@@ -957,7 +957,7 @@ class BackwardSimulationWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VSP Sim — Model & Survey")
+        self.setWindowTitle("Sim1Shot2D — Model & Survey")
         self._vp = None
         self._dx = self._dz = 1.0
         self._diffractors = []
@@ -1506,7 +1506,7 @@ class MainWindow(QMainWindow):
         try:
             self._load_project_from_ini(path)
             self._project_path = path
-            self.setWindowTitle("VSP Sim — " + os.path.basename(path))
+            self.setWindowTitle("Sim1Shot2D — " + os.path.basename(path))
         except Exception as e:
             import traceback
             QMessageBox.warning(
@@ -1535,7 +1535,7 @@ class MainWindow(QMainWindow):
         try:
             self._save_project_to_ini(path)
             self._project_path = path
-            self.setWindowTitle("VSP Sim — " + os.path.basename(path))
+            self.setWindowTitle("Sim1Shot2D — " + os.path.basename(path))
         except Exception as e:
             QMessageBox.warning(
                 self, "Save Project As",
@@ -1721,11 +1721,14 @@ class MainWindow(QMainWindow):
             self.canvas.set_source(None, None)
         self.canvas.set_receivers(self._receivers)
         self.canvas.set_diffractors(self._diffractors)
-        if self._smooth_size_m > 0 and vp_display is not None:
+        # Сглаженный слой — только по загруженной модели (без дифракторов).
+        vp_base = self._vp
+        if self._smooth_size_m > 0 and vp_base is not None:
             smoothed = prepare_migration_velocity(
-                vp_display.T, self._smooth_size_m, self._dx, self._dz
+                np.array(vp_base.T, dtype=np.float64, copy=True),
+                self._smooth_size_m, self._dx, self._dz
             ).T
-            self.canvas.set_smoothed_vp(smoothed)
+            self.canvas.set_smoothed_vp(np.array(smoothed, dtype=np.float64, copy=True))
         else:
             self.canvas.set_smoothed_vp(None)
         self._update_layer_availability()
@@ -1832,23 +1835,24 @@ class MainWindow(QMainWindow):
         save_every = max(1, int(round(snapshot_dt_ms / dt_ms)))
         order = 4 if laplacian == "4pt" else 2
 
-        vp_display = np.array(self._vp, dtype=np.float64, copy=True)
-        nz, nx = vp_display.shape
-        for d in self._diffractors:
-            x, z, r, v = d["x"], d["z"], d["r"], d["v"]
-            ix_c = int(round(x / self._dx))
-            iz_c = int(round(z / self._dz))
-            nr = max(1, int(round(r / min(self._dx, self._dz))))
-            for di in range(-nr, nr + 1):
-                for dj in range(-nr, nr + 1):
-                    ii, jj = iz_c + di, ix_c + dj
-                    if 0 <= ii < nz and 0 <= jj < nx:
-                        if np.sqrt((di * self._dz) ** 2 + (dj * self._dx) ** 2) <= r:
-                            vp_display[ii, jj] = v
         if model_source == "Smoothed" and self._smooth_size_m > 0:
             vp_display = prepare_migration_velocity(
-                vp_display.T, self._smooth_size_m, self._dx, self._dz
+                self._vp.T, self._smooth_size_m, self._dx, self._dz
             ).T
+        else:
+            vp_display = np.array(self._vp, dtype=np.float64, copy=True)
+            nz, nx = vp_display.shape
+            for d in self._diffractors:
+                x, z, r, v = d["x"], d["z"], d["r"], d["v"]
+                ix_c = int(round(x / self._dx))
+                iz_c = int(round(z / self._dz))
+                nr = max(1, int(round(r / min(self._dx, self._dz))))
+                for di in range(-nr, nr + 1):
+                    for dj in range(-nr, nr + 1):
+                        ii, jj = iz_c + di, ix_c + dj
+                        if 0 <= ii < nz and 0 <= jj < nx:
+                            if np.sqrt((di * self._dz) ** 2 + (dj * self._dx) ** 2) <= r:
+                                vp_display[ii, jj] = v
         vp_sim = vp_display.T
 
         sx, sz, freq = self._source[0], self._source[1], self._source[2]
@@ -2023,23 +2027,24 @@ class MainWindow(QMainWindow):
         save_every = max(1, int(round(snapshot_dt_ms / dt_ms)))
         order = 4 if laplacian == "4pt" else 2
 
-        vp_display = np.array(self._vp, dtype=np.float64, copy=True)
-        nz, nx = vp_display.shape
-        for d in self._diffractors:
-            x, z, r, v = d["x"], d["z"], d["r"], d["v"]
-            ix_c = int(round(x / self._dx))
-            iz_c = int(round(z / self._dz))
-            nr = max(1, int(round(r / min(self._dx, self._dz))))
-            for di in range(-nr, nr + 1):
-                for dj in range(-nr, nr + 1):
-                    ii, jj = iz_c + di, ix_c + dj
-                    if 0 <= ii < nz and 0 <= jj < nx:
-                        if np.sqrt((di * self._dz) ** 2 + (dj * self._dx) ** 2) <= r:
-                            vp_display[ii, jj] = v
         if model_source == "Smoothed" and self._smooth_size_m > 0:
             vp_display = prepare_migration_velocity(
-                vp_display.T, self._smooth_size_m, self._dx, self._dz
+                self._vp.T, self._smooth_size_m, self._dx, self._dz
             ).T
+        else:
+            vp_display = np.array(self._vp, dtype=np.float64, copy=True)
+            nz, nx = vp_display.shape
+            for d in self._diffractors:
+                x, z, r, v = d["x"], d["z"], d["r"], d["v"]
+                ix_c = int(round(x / self._dx))
+                iz_c = int(round(z / self._dz))
+                nr = max(1, int(round(r / min(self._dx, self._dz))))
+                for di in range(-nr, nr + 1):
+                    for dj in range(-nr, nr + 1):
+                        ii, jj = iz_c + di, ix_c + dj
+                        if 0 <= ii < nz and 0 <= jj < nx:
+                            if np.sqrt((di * self._dz) ** 2 + (dj * self._dx) ** 2) <= r:
+                                vp_display[ii, jj] = v
         vp_sim = vp_display.T
 
         n_save, n_rec = seismogram_data.shape
