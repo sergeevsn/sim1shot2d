@@ -181,7 +181,7 @@ class VelocityCanvas(FigureCanvas):
             self._cbar = None
         self._ax.clear()
         if self._vp is None or self._vp.size == 0:
-            self._ax.text(0.5, 0.5, "Модель не загружена", ha="center", va="center", transform=self._ax.transAxes)
+            self._ax.text(0.5, 0.5, "Model not loaded", ha="center", va="center", transform=self._ax.transAxes)
             self.draw()
             return
         nz, nx = self._vp.shape
@@ -257,11 +257,11 @@ class VelocityCanvas(FigureCanvas):
                 alpha=0.0,
             )
         im = self._ax.images[0] if self._ax.images else None
-        self._ax.set_xlabel("X, м")
-        self._ax.set_ylabel("Z, м")
+        self._ax.set_xlabel("X, m")
+        self._ax.set_ylabel("Z, m")
         self._ax.tick_params(axis="both", which="major", labelsize=8)
         if im is not None:
-            self._cbar = self._fig.colorbar(im, ax=self._ax, label="V, м/с", shrink=0.8)
+            self._cbar = self._fig.colorbar(im, ax=self._ax, label="V, m/s", shrink=0.8)
 
         if lay["show_survey"]:
             alpha = lay["alpha_survey"]
@@ -315,11 +315,11 @@ class SeismogramCanvas(FigureCanvas):
     def _redraw(self):
         self._ax.clear()
         if self._layout == "Profile":
-            self._ax.set_xlabel("X, м")
-            self._ax.set_ylabel("Time, мс")
+            self._ax.set_xlabel("X, m")
+            self._ax.set_ylabel("Time, ms")
         else:
-            self._ax.set_xlabel("Time, мс")
-            self._ax.set_ylabel("Z, м")
+            self._ax.set_xlabel("Time, ms")
+            self._ax.set_ylabel("Z, m")
         if self._data is not None and self._data.size > 0 and self._t_ms is not None and len(self._receivers) > 0:
             p = self._percentile
             vmin, vmax = np.percentile(self._data, [100 - p, p])
@@ -361,7 +361,7 @@ class SeismogramCanvas(FigureCanvas):
                     vmax=vmax,
                 )
         else:
-            self._ax.text(0.5, 0.5, "Сейсмограмма", ha="center", va="center", transform=self._ax.transAxes, fontsize=12)
+            self._ax.text(0.5, 0.5, "Seismogram", ha="center", va="center", transform=self._ax.transAxes, fontsize=12)
         self._ax.tick_params(axis="both", which="major", labelsize=8)
         self.draw()
 
@@ -376,13 +376,13 @@ class ModelParametersDialog(QDialog):
         self.dx_spin.setDecimals(2)
         self.dx_spin.setValue(dx)
         self.dx_spin.setSuffix(" m")
-        layout.addRow("dx (м):", self.dx_spin)
+        layout.addRow("dx (m):", self.dx_spin)
         self.dz_spin = QDoubleSpinBox()
         self.dz_spin.setRange(0.1, 10000)
         self.dz_spin.setDecimals(2)
         self.dz_spin.setValue(dz)
         self.dz_spin.setSuffix(" m")
-        layout.addRow("dz (м):", self.dz_spin)
+        layout.addRow("dz (m):", self.dz_spin)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -402,9 +402,9 @@ class SmoothDialog(QDialog):
         self.size_spin.setRange(0, 10000)
         self.size_spin.setDecimals(1)
         self.size_spin.setValue(smooth_size_m)
-        self.size_spin.setSuffix(" м")
-        self.size_spin.setToolTip("Радиус сглаживания в метрах; пересчитывается в sigma для 2D gaussian filter")
-        layout.addRow("Smooth Size (м):", self.size_spin)
+        self.size_spin.setSuffix(" m")
+        self.size_spin.setToolTip("Smoothing radius in meters; converted to sigma for 2D gaussian filter")
+        layout.addRow("Smooth Size (m):", self.size_spin)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -417,30 +417,30 @@ class SmoothDialog(QDialog):
 class DiffractorDialog(QDialog):
     def __init__(self, parent=None, x=0, z=0, r=10, v=2000):
         super().__init__(parent)
-        self.setWindowTitle("Добавить дифрактор")
+        self.setWindowTitle("Add diffractor")
         layout = QFormLayout(self)
         self.x_spin = QDoubleSpinBox()
         self.x_spin.setRange(-1e6, 1e6)
         self.x_spin.setDecimals(1)
         self.x_spin.setValue(x)
-        layout.addRow("X (м):", self.x_spin)
+        layout.addRow("X (m):", self.x_spin)
         self.z_spin = QDoubleSpinBox()
         self.z_spin.setRange(0, 1e6)
         self.z_spin.setDecimals(1)
         self.z_spin.setValue(z)
-        layout.addRow("Z (м):", self.z_spin)
+        layout.addRow("Z (m):", self.z_spin)
         self.r_spin = QDoubleSpinBox()
         self.r_spin.setRange(0.1, 1000)
         self.r_spin.setDecimals(1)
         self.r_spin.setValue(r)
         self.r_spin.setSuffix(" m")
-        layout.addRow("R — радиус (м):", self.r_spin)
+        layout.addRow("R — radius (m):", self.r_spin)
         self.v_spin = QDoubleSpinBox()
         self.v_spin.setRange(100, 10000)
         self.v_spin.setDecimals(0)
         self.v_spin.setValue(v)
         self.v_spin.setSuffix(" m/s")
-        layout.addRow("V — скорость (м/с):", self.v_spin)
+        layout.addRow("V — velocity (m/s):", self.v_spin)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -461,7 +461,7 @@ class DiffractorsDialog(QDialog):
         self.list_widget = QListWidget()
         self._refresh_list()
         layout.addWidget(self.list_widget)
-        btn_add = QPushButton("+ Добавить дифрактор")
+        btn_add = QPushButton("+ Add diffractor")
         btn_add.clicked.connect(self._on_add)
         layout.addWidget(btn_add)
         bb = QDialogButtonBox(QDialogButtonBox.Ok)
@@ -500,18 +500,18 @@ class SourceDialog(QDialog):
         self.x_spin.setRange(-1e6, 1e6)
         self.x_spin.setDecimals(1)
         self.x_spin.setValue(x)
-        layout.addRow("X (м):", self.x_spin)
+        layout.addRow("X (m):", self.x_spin)
         self.z_spin = QDoubleSpinBox()
         self.z_spin.setRange(0, 1e6)
         self.z_spin.setDecimals(1)
         self.z_spin.setValue(z)
-        layout.addRow("Z (м):", self.z_spin)
+        layout.addRow("Z (m):", self.z_spin)
         self.freq_spin = QDoubleSpinBox()
         self.freq_spin.setRange(1, 500)
         self.freq_spin.setDecimals(1)
         self.freq_spin.setValue(freq)
         self.freq_spin.setSuffix(" Hz")
-        layout.addRow("Freq — частота Рикера (Hz):", self.freq_spin)
+        layout.addRow("Freq — Ricker frequency (Hz):", self.freq_spin)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -526,7 +526,7 @@ class ReceiversDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Survey — Receivers")
         layout = QVBoxLayout(self)
-        grp = QGroupBox("Тип расстановки")
+        grp = QGroupBox("Receiver layout type")
         self.radio_profile = QRadioButton("Profile")
         self.radio_well = QRadioButton("Well")
         # Значения по умолчанию (если приёмников нет или не удаётся восстановить)
@@ -559,11 +559,11 @@ class ReceiversDialog(QDialog):
         self.p_z = QDoubleSpinBox()
         self.p_z.setRange(0, 1e6)
         self.p_z.setValue(p_z)
-        f_profile.addRow("Z (м):", self.p_z)
+        f_profile.addRow("Z (m):", self.p_z)
         self.p_x0 = QDoubleSpinBox()
         self.p_x0.setRange(-1e6, 1e6)
         self.p_x0.setValue(p_x0)
-        f_profile.addRow("X0 (м):", self.p_x0)
+        f_profile.addRow("X0 (m):", self.p_x0)
         self.p_nx = QSpinBox()
         self.p_nx.setRange(1, 10000)
         self.p_nx.setValue(p_nx)
@@ -571,7 +571,7 @@ class ReceiversDialog(QDialog):
         self.p_xstep = QDoubleSpinBox()
         self.p_xstep.setRange(0.1, 1000)
         self.p_xstep.setValue(p_xstep)
-        f_profile.addRow("X step (м):", self.p_xstep)
+        f_profile.addRow("X step (m):", self.p_xstep)
         layout.addWidget(self.form_profile)
 
         self.form_well = QFrame()
@@ -579,11 +579,11 @@ class ReceiversDialog(QDialog):
         self.w_x = QDoubleSpinBox()
         self.w_x.setRange(-1e6, 1e6)
         self.w_x.setValue(w_x)
-        f_well.addRow("X (м):", self.w_x)
+        f_well.addRow("X (m):", self.w_x)
         self.w_z0 = QDoubleSpinBox()
         self.w_z0.setRange(0, 1e6)
         self.w_z0.setValue(w_z0)
-        f_well.addRow("Z0 (м):", self.w_z0)
+        f_well.addRow("Z0 (m):", self.w_z0)
         self.w_nz = QSpinBox()
         self.w_nz.setRange(1, 10000)
         self.w_nz.setValue(w_nz)
@@ -591,7 +591,7 @@ class ReceiversDialog(QDialog):
         self.w_zstep = QDoubleSpinBox()
         self.w_zstep.setRange(0.1, 1000)
         self.w_zstep.setValue(w_zstep)
-        f_well.addRow("Z step (м):", self.w_zstep)
+        f_well.addRow("Z step (m):", self.w_zstep)
         layout.addWidget(self.form_well)
         self.form_well.setVisible(self.radio_well.isChecked())
         self.form_profile.setVisible(self.radio_profile.isChecked())
@@ -626,8 +626,8 @@ class ReceiversDialog(QDialog):
 
 
 class SimulationSettingsDialog(QDialog):
-    """Параметры симуляции: Tmax, NPML, DT, SNAPSHOT_DT, SEISMOGRAM_DT, Laplacian scheme. Модель (Original/Smoothed) задаётся в диалогах Run Forward / Run Backward."""
-    def __init__(self, parent=None, tmax_ms=1000, npml=50, dt_ms=None, snapshot_dt_ms=2, seismogram_dt_ms=2, laplacian="4pt"):
+    """Параметры симуляции: Tmax, NPML, DT, SNAPSHOT_DT, Laplacian scheme. Модель (Original/Smoothed) задаётся в диалогах Run Forward / Run Backward."""
+    def __init__(self, parent=None, tmax_ms=1000, npml=50, dt_ms=None, snapshot_dt_ms=2, laplacian="4pt"):
         super().__init__(parent)
         self.setWindowTitle("Simulation — Settings")
         layout = QFormLayout(self)
@@ -635,31 +635,25 @@ class SimulationSettingsDialog(QDialog):
         self.tmax_spin.setRange(1, 1e6)
         self.tmax_spin.setDecimals(0)
         self.tmax_spin.setValue(tmax_ms)
-        self.tmax_spin.setSuffix(" мс")
-        layout.addRow("Tmax (мс):", self.tmax_spin)
+        self.tmax_spin.setSuffix(" ms")
+        layout.addRow("Tmax (ms):", self.tmax_spin)
         self.npml_spin = QSpinBox()
         self.npml_spin.setRange(0, 500)
         self.npml_spin.setValue(npml)
-        layout.addRow("NPML (узлов сетки):", self.npml_spin)
+        layout.addRow("NPML (grid nodes):", self.npml_spin)
         self.dt_spin = QDoubleSpinBox()
         self.dt_spin.setRange(0.01, 10)
         self.dt_spin.setDecimals(3)
         self.dt_spin.setValue(dt_ms if dt_ms is not None else 0.5)
-        self.dt_spin.setSuffix(" мс")
-        self.dt_spin.setToolTip("По умолчанию ~0.5 CFL")
-        layout.addRow("DT (мс):", self.dt_spin)
+        self.dt_spin.setSuffix(" ms")
+        self.dt_spin.setToolTip("Default ~0.5 CFL")
+        layout.addRow("DT (ms):", self.dt_spin)
         self.snapshot_dt_spin = QDoubleSpinBox()
         self.snapshot_dt_spin.setRange(0.1, 1000)
         self.snapshot_dt_spin.setDecimals(2)
         self.snapshot_dt_spin.setValue(snapshot_dt_ms)
-        self.snapshot_dt_spin.setSuffix(" мс")
-        layout.addRow("SNAPSHOT_DT (мс):", self.snapshot_dt_spin)
-        self.seismogram_dt_spin = QDoubleSpinBox()
-        self.seismogram_dt_spin.setRange(0.1, 1000)
-        self.seismogram_dt_spin.setDecimals(2)
-        self.seismogram_dt_spin.setValue(seismogram_dt_ms)
-        self.seismogram_dt_spin.setSuffix(" мс")
-        layout.addRow("SEISMOGRAM_DT (мс):", self.seismogram_dt_spin)
+        self.snapshot_dt_spin.setSuffix(" ms")
+        layout.addRow("SNAPSHOT_DT (ms):", self.snapshot_dt_spin)
         self.laplacian_combo = QComboBox()
         self.laplacian_combo.addItems(["4pt", "2pt"])
         self.laplacian_combo.setCurrentText(laplacian if laplacian in ("4pt", "2pt") else "4pt")
@@ -675,7 +669,6 @@ class SimulationSettingsDialog(QDialog):
             "npml": self.npml_spin.value(),
             "dt_ms": self.dt_spin.value(),
             "snapshot_dt_ms": self.snapshot_dt_spin.value(),
-            "seismogram_dt_ms": self.seismogram_dt_spin.value(),
             "laplacian": self.laplacian_combo.currentText(),
         }
 
@@ -711,7 +704,7 @@ class RTMPostProcessingDialog(QDialog):
         self._laplacian_order_combo = QComboBox()
         self._laplacian_order_combo.addItems(["2", "4"])
         self._laplacian_order_combo.setCurrentText(str(laplacian_order) if str(laplacian_order) in ("2", "4") else "4")
-        layout.addRow("Порядок лапласиана:", self._laplacian_order_combo)
+        layout.addRow("Laplacian order:", self._laplacian_order_combo)
         self._chk_agc = QCheckBox()
         self._chk_agc.setChecked(agc_on)
         layout.addRow("AGC:", self._chk_agc)
@@ -719,8 +712,8 @@ class RTMPostProcessingDialog(QDialog):
         self._agc_window_z.setRange(1, 100000)
         self._agc_window_z.setDecimals(0)
         self._agc_window_z.setValue(agc_window_z_m)
-        self._agc_window_z.setSuffix(" м")
-        layout.addRow("Размер окна по Z:", self._agc_window_z)
+        self._agc_window_z.setSuffix(" m")
+        layout.addRow("Window size along Z:", self._agc_window_z)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -739,16 +732,16 @@ class ForwardRunNameDialog(QDialog):
     """Запрос имени набора и модели перед Run Forward."""
     def __init__(self, default_name="Fwd 1", model_source="Original", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Run Forward — имя набора и модель")
+        self.setWindowTitle("Run Forward — run name and model")
         layout = QFormLayout(self)
         self._name_edit = QLineEdit()
-        self._name_edit.setPlaceholderText("Например: Fwd From Orig Model")
+        self._name_edit.setPlaceholderText("e.g. Fwd From Orig Model")
         self._name_edit.setText(default_name)
-        layout.addRow("Имя набора:", self._name_edit)
+        layout.addRow("Run name:", self._name_edit)
         self._model_combo = QComboBox()
         self._model_combo.addItems(["Original", "Smoothed"])
         self._model_combo.setCurrentText(model_source if model_source in ("Original", "Smoothed") else "Original")
-        layout.addRow("Модель для расчёта:", self._model_combo)
+        layout.addRow("Model for simulation:", self._model_combo)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -763,40 +756,50 @@ class ForwardRunNameDialog(QDialog):
 
 class BackwardRunNameDialog(QDialog):
     """Запрос имени набора, источника сейсмограммы (сейсмограмма или Residual) и модели перед Run Backward."""
-    def __init__(self, default_name="Bwd 1", seismogram_names=None, model_source="Original", parent=None):
+    def __init__(self, default_name="Bwd 1", seismogram_names=None, model_source="Original",
+                 default_source_type=None, default_residual_full=None, default_residual_smoothed=None,
+                 parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Run Backward — имя набора, сейсмограмма и модель")
+        self.setWindowTitle("Run Backward — run name, seismogram and model")
         layout = QFormLayout(self)
         self._name_edit = QLineEdit()
-        self._name_edit.setPlaceholderText("Например: Bwd From Smoothed")
+        self._name_edit.setPlaceholderText("e.g. Bwd From Smoothed")
         self._name_edit.setText(default_name)
-        layout.addRow("Имя набора:", self._name_edit)
+        layout.addRow("Run name:", self._name_edit)
         self._source_type_combo = QComboBox()
-        self._source_type_combo.addItems(["Сейсмограмма", "Residual"])
+        self._source_type_combo.addItem("Seismogram")
+        if (seismogram_names or []) and len(seismogram_names) >= 2:
+            self._source_type_combo.addItem("Residual")
         self._source_type_combo.currentTextChanged.connect(self._on_source_type_changed)
-        layout.addRow("Тип источника:", self._source_type_combo)
+        layout.addRow("Source type:", self._source_type_combo)
         self._stack = QStackedWidget()
         page_named = QWidget()
         form_named = QFormLayout(page_named)
         self._seismogram_combo = QComboBox()
         self._seismogram_combo.addItems(seismogram_names or [])
-        form_named.addRow("Сейсмограмма (источник):", self._seismogram_combo)
+        form_named.addRow("Seismogram (source):", self._seismogram_combo)
         self._stack.addWidget(page_named)
         page_residual = QWidget()
         form_residual = QFormLayout(page_residual)
         self._residual_full_combo = QComboBox()
         self._residual_full_combo.addItems(seismogram_names or [])
-        form_residual.addRow("Full fwd (сейсмограмма):", self._residual_full_combo)
+        form_residual.addRow("Full fwd (seismogram):", self._residual_full_combo)
         self._residual_smoothed_combo = QComboBox()
         self._residual_smoothed_combo.addItems(seismogram_names or [])
-        form_residual.addRow("Smoothed fwd (сейсмограмма):", self._residual_smoothed_combo)
+        form_residual.addRow("Smoothed fwd (seismogram):", self._residual_smoothed_combo)
         self._stack.addWidget(page_residual)
         layout.addRow(self._stack)
+        if default_source_type == "Residual":
+            self._source_type_combo.setCurrentText("Residual")
+            if default_residual_full and self._residual_full_combo.findText(default_residual_full) >= 0:
+                self._residual_full_combo.setCurrentText(default_residual_full)
+            if default_residual_smoothed and self._residual_smoothed_combo.findText(default_residual_smoothed) >= 0:
+                self._residual_smoothed_combo.setCurrentText(default_residual_smoothed)
         self._on_source_type_changed(self._source_type_combo.currentText())
         self._model_combo = QComboBox()
         self._model_combo.addItems(["Original", "Smoothed"])
         self._model_combo.setCurrentText(model_source if model_source in ("Original", "Smoothed") else "Original")
-        layout.addRow("Модель для расчёта:", self._model_combo)
+        layout.addRow("Model for simulation:", self._model_combo)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -812,11 +815,11 @@ class BackwardRunNameDialog(QDialog):
         return self._name_edit.text().strip() or "Bwd 1"
 
     def get_seismogram_source_type(self):
-        """Возвращает 'named' или 'residual'."""
+        """Returns 'named' or 'residual'."""
         return "residual" if self._source_type_combo.currentText() == "Residual" else "named"
 
     def get_seismogram_source_name(self):
-        """Для типа 'named' — имя набора сейсмограммы; для 'residual' — None."""
+        """For 'named' type — seismogram run name; for 'residual' — None."""
         if self.get_seismogram_source_type() != "named":
             return None
         return self._seismogram_combo.currentText() if self._seismogram_combo.count() > 0 else None
@@ -850,7 +853,7 @@ class RTMBuildDialog(QDialog):
         self._source_combo = QComboBox()
         self._source_combo.addItems(["P", "Vz", "Vx"])
         self._source_combo.setCurrentText(source if source in ("P", "Vz", "Vx") else "P")
-        layout.addRow("Компонент (Source):", self._source_combo)
+        layout.addRow("Component (Source):", self._source_combo)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -965,7 +968,7 @@ class MainWindow(QMainWindow):
         self._receivers = []
         self._sim_settings = {
             "tmax_ms": 1000, "npml": 50, "dt_ms": 0.5,
-            "snapshot_dt_ms": 2, "seismogram_dt_ms": 2, "laplacian": "4pt",
+            "snapshot_dt_ms": 2, "laplacian": "4pt",
         }
         self._smooth_size_m = 0.0
         self._forward_runs = []   # [{"name": str, "snapshots": {"P fwd", "Vz fwd", "Vx fwd"}, "seismogram_data", "seismogram_t_ms"}, ...]
@@ -1044,7 +1047,7 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(row)
         self._snapshot_slider_row = QWidget()
         slayout = QHBoxLayout(self._snapshot_slider_row)
-        slayout.addWidget(QLabel("Время снапшота:"))
+        slayout.addWidget(QLabel("Snapshot time:"))
         self._snapshot_slider = QSlider(Qt.Horizontal)
         self._snapshot_slider.setMinimum(0)
         self._snapshot_slider.setMaximum(0)
@@ -1057,7 +1060,7 @@ class MainWindow(QMainWindow):
 
         self._progress_row = QWidget()
         playout = QHBoxLayout(self._progress_row)
-        playout.addWidget(QLabel("Прогресс:"))
+        playout.addWidget(QLabel("Progress:"))
         self._progress_bar = QProgressBar()
         self._progress_bar.setMinimum(0)
         self._progress_bar.setMaximum(100)
@@ -1071,8 +1074,8 @@ class MainWindow(QMainWindow):
         self._backward_thread = None
         self._backward_worker = None
 
-        self._memory_label = QLabel("Память: —")
-        self._memory_label.setToolTip("Использование памяти процессом (RSS). Обновляется каждые 5 с.")
+        self._memory_label = QLabel("Memory: —")
+        self._memory_label.setToolTip("Process memory usage (RSS). Updated every 5 s.")
         self.statusBar().addPermanentWidget(self._memory_label)
         self._memory_timer = QTimer(self)
         self._memory_timer.timeout.connect(self._update_memory_status)
@@ -1147,7 +1150,7 @@ class MainWindow(QMainWindow):
         panel = QFrame()
         panel.setFrameStyle(QFrame.StyledPanel)
         layout = QVBoxLayout(panel)
-        grp_current = QGroupBox("Текущие наборы")
+        grp_current = QGroupBox("Current runs")
         gl_current = QFormLayout()
         self._combo_current_fwd = QComboBox()
         self._combo_current_fwd.currentTextChanged.connect(self._on_current_fwd_changed)
@@ -1160,9 +1163,9 @@ class MainWindow(QMainWindow):
         gl_current.addRow("Current Seismogram:", self._combo_current_seismogram)
         grp_current.setLayout(gl_current)
         layout.addWidget(grp_current)
-        grp = QGroupBox("Слои Z-X")
+        grp = QGroupBox("Z-X layers")
         gl = QGridLayout()
-        self._chk_original = QCheckBox("Оригинальная модель")
+        self._chk_original = QCheckBox("Original model")
         self._chk_original.setChecked(True)
         self._chk_original.stateChanged.connect(self._update_canvas_layers)
         self._alpha_original = QDoubleSpinBox()
@@ -1174,7 +1177,7 @@ class MainWindow(QMainWindow):
         gl.addWidget(QLabel("α"), 0, 2)
         gl.addWidget(self._alpha_original, 0, 3)
 
-        self._chk_survey = QCheckBox("Съёмка")
+        self._chk_survey = QCheckBox("Survey")
         self._chk_survey.setChecked(True)
         self._chk_survey.stateChanged.connect(self._update_canvas_layers)
         self._alpha_survey = QDoubleSpinBox()
@@ -1186,7 +1189,7 @@ class MainWindow(QMainWindow):
         gl.addWidget(QLabel("α"), 1, 2)
         gl.addWidget(self._alpha_survey, 1, 3)
 
-        self._chk_smoothed = QCheckBox("Сглаженная модель")
+        self._chk_smoothed = QCheckBox("Smoothed model")
         self._chk_smoothed.setChecked(False)
         self._chk_smoothed.stateChanged.connect(self._update_canvas_layers)
         self._alpha_smoothed = QDoubleSpinBox()
@@ -1392,11 +1395,11 @@ class MainWindow(QMainWindow):
         limit_mb = _get_system_memory_limit_mb()
         if mb is not None:
             if limit_mb is not None:
-                self._memory_label.setText("Память: {:.0f} / {:.0f} МБ".format(mb, limit_mb))
+                self._memory_label.setText("Memory: {:.0f} / {:.0f} MB".format(mb, limit_mb))
             else:
-                self._memory_label.setText("Память: {:.0f} МБ".format(mb))
+                self._memory_label.setText("Memory: {:.0f} MB".format(mb))
         else:
-            self._memory_label.setText("Память: —")
+            self._memory_label.setText("Memory: —")
 
     def _maybe_reduce_memory(self):
         """Если использование памяти выше лимита — предлагает удалить самые старые наборы Forward/Backward."""
@@ -1406,9 +1409,9 @@ class MainWindow(QMainWindow):
             return
         reply = QMessageBox.question(
             self,
-            "Память",
-            "Использование памяти ({:.0f} МБ) превышает рекомендуемый лимит ({:.0f} МБ).\n"
-            "Удалить самые старые наборы Forward и Backward для освобождения памяти?".format(mb, limit_mb),
+            "Memory",
+            "Memory usage ({:.0f} MB) exceeds the recommended limit ({:.0f} MB).\n"
+            "Remove the oldest Forward and Backward runs to free memory?".format(mb, limit_mb),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -1443,7 +1446,7 @@ class MainWindow(QMainWindow):
             self._refresh_current_combos()
             self._update_layer_availability()
             self._update_memory_status()
-            QMessageBox.information(self, "Память", "Самые старые наборы удалены.")
+            QMessageBox.information(self, "Memory", "Oldest runs have been removed.")
 
     def _update_canvas_layers(self):
         p_snap = self._snapshot_percentile_spin.value()
@@ -1511,7 +1514,7 @@ class MainWindow(QMainWindow):
             import traceback
             QMessageBox.warning(
                 self, "Load Project",
-                "Не удалось загрузить проект:\n\n{}".format(e))
+                "Failed to load project:\n\n{}".format(e))
             traceback.print_exc()
 
     def _file_save_project(self):
@@ -1523,7 +1526,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(
                 self, "Save Project",
-                "Не удалось сохранить проект:\n\n{}".format(e))
+                "Failed to save project:\n\n{}".format(e))
 
     def _file_save_project_as(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -1539,7 +1542,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(
                 self, "Save Project As",
-                "Не удалось сохранить проект:\n\n{}".format(e))
+                "Failed to save project:\n\n{}".format(e))
 
     def _file_exit(self):
         QApplication.quit()
@@ -1661,7 +1664,6 @@ class MainWindow(QMainWindow):
             self._sim_settings["npml"] = cfg.getint("simulation", "npml", fallback=self._sim_settings["npml"])
             self._sim_settings["dt_ms"] = cfg.getfloat("simulation", "dt_ms", fallback=self._sim_settings["dt_ms"])
             self._sim_settings["snapshot_dt_ms"] = cfg.getfloat("simulation", "snapshot_dt_ms", fallback=self._sim_settings["snapshot_dt_ms"])
-            self._sim_settings["seismogram_dt_ms"] = cfg.getfloat("simulation", "seismogram_dt_ms", fallback=self._sim_settings["seismogram_dt_ms"])
             self._sim_settings["laplacian"] = cfg.get("simulation", "laplacian", fallback=self._sim_settings["laplacian"]).strip()
             self._last_model_source = cfg.get("simulation", "model_source", fallback="Original").strip()
 
@@ -1669,7 +1671,7 @@ class MainWindow(QMainWindow):
 
     def _model_open(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Открыть скоростную модель (SEG-Y)", "", "SEG-Y (*.sgy *.segy);;All (*)")
+            self, "Open velocity model (SEG-Y)", "", "SEG-Y (*.sgy *.segy);;All (*)")
         if not path:
             return
         try:
@@ -1677,19 +1679,19 @@ class MainWindow(QMainWindow):
         except Exception as e:
             import traceback
             import sys
-            print("Ошибка загрузки модели из файла:", file=sys.stderr)
+            print("Error loading model from file:", file=sys.stderr)
             print(str(e), file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Warning)
-            msg.setWindowTitle("Ошибка загрузки модели")
-            msg.setText("Не удалось загрузить модель из файла.")
+            msg.setWindowTitle("Model load error")
+            msg.setText("Failed to load model from file.")
             msg.setInformativeText(str(e))
             msg.setDetailedText(traceback.format_exc())
             msg.exec_()
             return
         if vp is None:
-            QMessageBox.warning(self, "Ошибка", "Не удалось загрузить модель из файла.")
+            QMessageBox.warning(self, "Error", "Failed to load model from file.")
             return
         self._vp = vp
         self._dx, self._dz = dx, dz
@@ -1792,7 +1794,6 @@ class MainWindow(QMainWindow):
             npml=self._sim_settings["npml"],
             dt_ms=self._sim_settings["dt_ms"],
             snapshot_dt_ms=self._sim_settings["snapshot_dt_ms"],
-            seismogram_dt_ms=self._sim_settings["seismogram_dt_ms"],
             laplacian=self._sim_settings["laplacian"],
         )
         if dlg.exec_() == QDialog.Accepted:
@@ -1800,10 +1801,10 @@ class MainWindow(QMainWindow):
 
     def _simulation_run_forward(self):
         if self._vp is None or self._vp.size == 0:
-            QMessageBox.warning(self, "Run Forward", "Загрузите модель (Model → Open).")
+            QMessageBox.warning(self, "Run Forward", "Load model first (Model → Open).")
             return
         if self._source is None:
-            QMessageBox.warning(self, "Run Forward", "Задайте источник (Survey → Source).")
+            QMessageBox.warning(self, "Run Forward", "Set source (Survey → Source).")
             return
         default_name = "Fwd 1"
         existing = [r["name"] for r in self._forward_runs]
@@ -1929,7 +1930,7 @@ class MainWindow(QMainWindow):
             self._update_layer_availability()
             self._update_memory_status()
             self._maybe_reduce_memory()
-        QMessageBox.information(self, "Run Forward", "Прямой прогон завершён.")
+        QMessageBox.information(self, "Run Forward", "Forward run completed.")
 
     def _on_forward_error(self, err_msg):
         if self._forward_thread is not None:
@@ -1938,14 +1939,14 @@ class MainWindow(QMainWindow):
             self._forward_thread = None
         self._forward_worker = None
         self._progress_bar.setValue(0)
-        QMessageBox.warning(self, "Run Forward", "Ошибка:\n\n" + err_msg)
+        QMessageBox.warning(self, "Run Forward", "Error:\n\n" + err_msg)
 
     def _simulation_run_backward(self):
         if len(self._forward_runs) == 0:
-            QMessageBox.warning(self, "Run Backward", "Сначала выполните прямой прогон (Run Forward).")
+            QMessageBox.warning(self, "Run Backward", "Run forward first (Run Forward).")
             return
         if not self._receivers:
-            QMessageBox.warning(self, "Run Backward", "Задайте приёмники (Survey → Receivers).")
+            QMessageBox.warning(self, "Run Backward", "Set receivers (Survey → Receivers).")
             return
         default_name = "Bwd 1"
         existing = [r["name"] for r in self._backward_runs]
@@ -1955,10 +1956,20 @@ class MainWindow(QMainWindow):
                 default_name = cand
                 break
         seismogram_names = [r["name"] for r in self._forward_runs]
+        default_source_type = None
+        default_residual_full = None
+        default_residual_smoothed = None
+        if len(seismogram_names) >= 2:
+            default_source_type = "Residual"
+            default_residual_full = seismogram_names[-2]
+            default_residual_smoothed = seismogram_names[-1]
         dlg = BackwardRunNameDialog(
             default_name=default_name,
             seismogram_names=seismogram_names,
             model_source=getattr(self, "_last_model_source", "Original") or "Original",
+            default_source_type=default_source_type,
+            default_residual_full=default_residual_full,
+            default_residual_smoothed=default_residual_smoothed,
             parent=self,
         )
         if dlg.exec_() != QDialog.Accepted:
@@ -1968,11 +1979,11 @@ class MainWindow(QMainWindow):
         if source_type == "named":
             self._pending_backward_seismogram_name = dlg.get_seismogram_source_name()
             if not self._pending_backward_seismogram_name:
-                QMessageBox.warning(self, "Run Backward", "Выберите источник сейсмограммы.")
+                QMessageBox.warning(self, "Run Backward", "Select seismogram source.")
                 return
             fwd_run = self._get_forward_run(self._pending_backward_seismogram_name)
             if not fwd_run or fwd_run.get("seismogram_data") is None:
-                QMessageBox.warning(self, "Run Backward", "У выбранного набора нет сейсмограммы.")
+                QMessageBox.warning(self, "Run Backward", "Selected run has no seismogram.")
                 return
             seismogram_data = np.array(fwd_run["seismogram_data"], dtype=np.float64, copy=True)
             seismogram_t_ms = fwd_run["seismogram_t_ms"]
@@ -1980,18 +1991,18 @@ class MainWindow(QMainWindow):
             full_name = dlg.get_residual_full_name()
             smoothed_name = dlg.get_residual_smoothed_name()
             if not full_name or not smoothed_name:
-                QMessageBox.warning(self, "Run Backward", "Выберите Full fwd и Smoothed fwd для Residual.")
+                QMessageBox.warning(self, "Run Backward", "Select Full fwd and Smoothed fwd for Residual.")
                 return
             if full_name == smoothed_name:
-                QMessageBox.warning(self, "Run Backward", "Full fwd и Smoothed fwd должны быть разными наборами.")
+                QMessageBox.warning(self, "Run Backward", "Full fwd and Smoothed fwd must be different runs.")
                 return
             fwd_full = self._get_forward_run(full_name)
             fwd_smooth = self._get_forward_run(smoothed_name)
             if not fwd_full or fwd_full.get("seismogram_data") is None:
-                QMessageBox.warning(self, "Run Backward", "У набора «{}» нет сейсмограммы.".format(full_name))
+                QMessageBox.warning(self, "Run Backward", "Run «{}» has no seismogram.".format(full_name))
                 return
             if not fwd_smooth or fwd_smooth.get("seismogram_data") is None:
-                QMessageBox.warning(self, "Run Backward", "У набора «{}» нет сейсмограммы.".format(smoothed_name))
+                QMessageBox.warning(self, "Run Backward", "Run «{}» has no seismogram.".format(smoothed_name))
                 return
             full_data = np.asarray(fwd_full["seismogram_data"], dtype=np.float64)
             smooth_data = np.asarray(fwd_smooth["seismogram_data"], dtype=np.float64)
@@ -2002,11 +2013,11 @@ class MainWindow(QMainWindow):
             if n_rec != n_rec_s:
                 QMessageBox.warning(
                     self, "Run Backward",
-                    "Число приёмников в Full и Smoothed должно совпадать."
+                    "Receiver count must match between Full and Smoothed."
                 )
                 return
             if len(t_full) != n_save_full or len(t_smooth) != n_save_smooth:
-                QMessageBox.warning(self, "Run Backward", "Несогласованные размеры сейсмограмм.")
+                QMessageBox.warning(self, "Run Backward", "Inconsistent seismogram dimensions.")
                 return
             smooth_on_full = np.zeros_like(full_data)
             for rec in range(n_rec):
@@ -2097,7 +2108,7 @@ class MainWindow(QMainWindow):
             self._update_layer_availability()
             self._update_memory_status()
             self._maybe_reduce_memory()
-        QMessageBox.information(self, "Run Backward", "Обратный прогон завершён.")
+        QMessageBox.information(self, "Run Backward", "Backward run completed.")
 
     def _on_backward_error(self, err_msg):
         if self._backward_thread is not None:
@@ -2106,7 +2117,7 @@ class MainWindow(QMainWindow):
             self._backward_thread = None
         self._backward_worker = None
         self._progress_bar.setValue(0)
-        QMessageBox.warning(self, "Run Backward", "Ошибка:\n\n" + err_msg)
+        QMessageBox.warning(self, "Run Backward", "Error:\n\n" + err_msg)
 
     def _rtm_settings_dialog(self):
         dlg = RTMSettingsDialog(
@@ -2121,7 +2132,7 @@ class MainWindow(QMainWindow):
         if len(self._forward_runs) == 0 or len(self._backward_runs) == 0:
             QMessageBox.warning(
                 self, "RTM Build",
-                "Нужны хотя бы один forward и один backward набор. Выполните Run Forward и Run Backward.",
+                "At least one forward and one backward run required. Run Forward and Run Backward first.",
             )
             return
         fwd_names = [r["name"] for r in self._forward_runs]
@@ -2141,19 +2152,19 @@ class MainWindow(QMainWindow):
         src = dlg.get_source()
         self._rtm_settings["source"] = src
         if not fwd_name or not bwd_name:
-            QMessageBox.warning(self, "RTM Build", "Выберите источники Forward и Backward.")
+            QMessageBox.warning(self, "RTM Build", "Select Forward and Backward sources.")
             return
         fwd_run = self._get_forward_run(fwd_name)
         bwd_run = self._get_backward_run(bwd_name)
         if not fwd_run or not bwd_run:
-            QMessageBox.warning(self, "RTM Build", "Набор не найден.")
+            QMessageBox.warning(self, "RTM Build", "Run not found.")
             return
         fwd = (fwd_run.get("snapshots") or {}).get(src + " fwd")
         bwd = (bwd_run.get("snapshots") or {}).get(src + " bwd")
         if fwd is None or bwd is None:
             QMessageBox.warning(
                 self, "RTM Build",
-                "Нет снапшотов «{}» в выбранных наборах.".format(src),
+                "No «{}» snapshots in selected runs.".format(src),
             )
             return
         fwd = np.asarray(fwd, dtype=np.float64)
@@ -2161,7 +2172,7 @@ class MainWindow(QMainWindow):
         if fwd.shape != bwd.shape:
             QMessageBox.warning(
                 self, "RTM Build",
-                "Размеры снапшотов forward и backward не совпадают.",
+                "Forward and backward snapshot dimensions do not match.",
             )
             return
         # Backward снапшоты в обратном времени — переворачиваем по оси t перед перемножением
@@ -2169,7 +2180,7 @@ class MainWindow(QMainWindow):
         # Кросс-корреляция по времени (zero-lag): image_xy = sum_t fwd[t] * bwd[t]
         image_xy = np.sum(fwd * bwd, axis=0)
         if image_xy.ndim != 2:
-            QMessageBox.warning(self, "RTM Build", "Ожидается 2D срез.")
+            QMessageBox.warning(self, "RTM Build", "Expected 2D slice.")
             return
         self._rtm_image_base = image_xy.T.copy()
         self._rtm_image = image_xy.T.copy()
@@ -2179,14 +2190,14 @@ class MainWindow(QMainWindow):
         self._update_canvas_layers()
         QMessageBox.information(
             self, "RTM Build",
-            "Image построен: Forward «{}», Backward «{}», компонент «{}».".format(fwd_name, bwd_name, src),
+            "Image built: Forward «{}», Backward «{}», component «{}».".format(fwd_name, bwd_name, src),
         )
 
     def _rtm_post_processing_dialog(self):
         if self._rtm_image is None or self._rtm_image.size == 0:
             QMessageBox.warning(
                 self, "RTM Post-Processing",
-                "Сначала постройте Image (RTM → Build).",
+                "Build Image first (RTM → Build).",
             )
             return
         dlg = RTMPostProcessingDialog(

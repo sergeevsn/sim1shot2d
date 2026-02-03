@@ -36,8 +36,8 @@ def load_velocity_from_segy(path):
 
             # Данные: трассы — столбцы по X, сэмплы — по глубине Z
             # f.trace[:] в segyio — генератор, приводим к списку
-            raw = np.asarray(list(f.trace[:]), dtype=np.float64)
+            raw = f.trace.raw[:]
             vp = raw.T  # (n_samples, n_traces) = (nz, nx)
         return vp, dx, dz
     except Exception as e:
-        raise RuntimeError("Ошибка загрузки SEG-Y: {}: {}".format(type(e).__name__, e)) from e
+        raise RuntimeError("SEG-Y load error: {}: {}".format(type(e).__name__, e)) from e

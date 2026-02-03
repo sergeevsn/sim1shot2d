@@ -265,7 +265,7 @@ def fd2d_forward_first_order(
         update_fn(p, vx, vz, vp_padded, rho, dt, dx, dz, nx, nz)
 
         # Источник в давление (взрыв)
-        p[isrc, jsrc] += src[it] * dt
+        p[isrc, jsrc] += src[it]
 
         p *= absorb_coeff
         vx *= absorb_coeff
@@ -376,7 +376,7 @@ def fd2d_backward_first_order(
     )
 
     absorb_coeff = absorb(nx, nz, n_absorb)
-    inject_scale = float(dt)
+    inject_scale = 1.0
 
     i0, i1 = n_absorb, n_absorb + nx_crop
     j0, j1 = n_absorb, n_absorb + nz_crop
