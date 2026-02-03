@@ -186,6 +186,9 @@ def fd2d_forward_first_order(
     return_vx=False,
     order=4,
     progress_callback=None,
+    snapshots_h5_path=None,
+    snapshot_dt_ms=None,
+    tmax_ms=None,
 ):
     """
     Прямое моделирование 2D акустики в форме 1-го порядка (скорость–давление),
@@ -250,9 +253,21 @@ def fd2d_forward_first_order(
     nx_crop = vp.shape[0]
     nz_crop = vp.shape[1]
     n_save = (nt + save_every - 1) // save_every
-    p_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32)
-    vx_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32) if return_vx else None
-    vz_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32) if return_vz else None
+    write_to_h5 = snapshots_h5_path is not None
+    if write_to_h5:
+        from . import snapshot_io
+        _tmax_ms = float(tmax_ms) if tmax_ms is not None else nt * dt * 1000.0
+        _snapshot_dt_ms = float(snapshot_dt_ms) if snapshot_dt_ms is not None else save_every * dt * 1000.0
+        writer = snapshot_io.create_snapshots_h5_writer(
+            snapshots_h5_path, n_save, nx_crop, nz_crop,
+            run_type="forward", snapshot_dt_ms=_snapshot_dt_ms, tmax_ms=_tmax_ms,
+        )
+        p_history = vx_history = vz_history = None
+    else:
+        writer = None
+        p_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32)
+        vx_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32) if return_vx else None
+        vz_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32) if return_vz else None
 
     absorb_coeff = absorb(nx, nz, n_absorb)
 
@@ -272,16 +287,27 @@ def fd2d_forward_first_order(
         vz *= absorb_coeff
 
         if it % save_every == 0 and save_idx < n_save:
-            p_history[save_idx] = p[i0:i1, j0:j1]
-            if return_vx:
-                vx_history[save_idx] = vx[i0:i1, j0:j1]
-            if return_vz:
-                vz_history[save_idx] = vz[i0:i1, j0:j1]
+            if write_to_h5:
+                writer.write_frame(
+                    save_idx,
+                    p[i0:i1, j0:j1],
+                    vx[i0:i1, j0:j1] if return_vx else None,
+                    vz[i0:i1, j0:j1] if return_vz else None,
+                )
+            else:
+                p_history[save_idx] = p[i0:i1, j0:j1]
+                if return_vx:
+                    vx_history[save_idx] = vx[i0:i1, j0:j1]
+                if return_vz:
+                    vz_history[save_idx] = vz[i0:i1, j0:j1]
             save_idx += 1
 
         if progress_callback is not None:
             progress_callback(it + 1, nt)
 
+    if write_to_h5:
+        writer.close()
+        return (snapshots_h5_path,)
     if save_idx < n_save:
         p_history = p_history[:save_idx]
         if return_vx:
@@ -310,6 +336,10 @@ def fd2d_backward_first_order(
     return_vx=False,
     order=4,
     progress_callback=None,
+    snapshots_h5_path=None,
+    snapshot_dt_ms=None,
+    tmax_ms=None,
+    seismogram_source=None,
 ):
     """
     Обратное распространение для RTM: инжекция записей в обратном времени,
@@ -369,11 +399,24 @@ def fd2d_backward_first_order(
     nx_crop = vp.shape[0]
     nz_crop = vp.shape[1]
     n_save = (nt + save_every - 1) // save_every
-    p_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32)
-    vx_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32) if return_vx else None
-    vz_history = (
-        np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32) if return_vz else None
-    )
+    write_to_h5 = snapshots_h5_path is not None
+    if write_to_h5:
+        from . import snapshot_io
+        _tmax_ms = float(tmax_ms) if tmax_ms is not None else nt * dt * 1000.0
+        _snapshot_dt_ms = float(snapshot_dt_ms) if snapshot_dt_ms is not None else save_every * dt * 1000.0
+        writer = snapshot_io.create_snapshots_h5_writer(
+            snapshots_h5_path, n_save, nx_crop, nz_crop,
+            run_type="backward", snapshot_dt_ms=_snapshot_dt_ms, tmax_ms=_tmax_ms,
+            seismogram_source=seismogram_source,
+        )
+        p_history = vx_history = vz_history = None
+    else:
+        writer = None
+        p_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32)
+        vx_history = np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32) if return_vx else None
+        vz_history = (
+            np.zeros((n_save, nx_crop, nz_crop), dtype=np.float32) if return_vz else None
+        )
 
     absorb_coeff = absorb(nx, nz, n_absorb)
     inject_scale = 1.0
@@ -395,16 +438,27 @@ def fd2d_backward_first_order(
         vz *= absorb_coeff
 
         if it % save_every == 0 and save_idx < n_save:
-            p_history[save_idx] = p[i0:i1, j0:j1]
-            if return_vx:
-                vx_history[save_idx] = vx[i0:i1, j0:j1]
-            if return_vz:
-                vz_history[save_idx] = vz[i0:i1, j0:j1]
+            if write_to_h5:
+                writer.write_frame(
+                    save_idx,
+                    p[i0:i1, j0:j1],
+                    vx[i0:i1, j0:j1] if return_vx else None,
+                    vz[i0:i1, j0:j1] if return_vz else None,
+                )
+            else:
+                p_history[save_idx] = p[i0:i1, j0:j1]
+                if return_vx:
+                    vx_history[save_idx] = vx[i0:i1, j0:j1]
+                if return_vz:
+                    vz_history[save_idx] = vz[i0:i1, j0:j1]
             save_idx += 1
 
         if progress_callback is not None:
             progress_callback(it + 1, nt)
 
+    if write_to_h5:
+        writer.close()
+        return (snapshots_h5_path,)
     if save_idx < n_save:
         p_history = p_history[:save_idx]
         if return_vx:

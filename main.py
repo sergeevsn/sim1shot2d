@@ -8,6 +8,7 @@ import gc
 import numpy as np
 from configparser import ConfigParser
 from scipy import ndimage
+from scipy.interpolate import RegularGridInterpolator
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel, QFileDialog,
     QMenu, QAction, QDialog, QFormLayout, QDoubleSpinBox, QSpinBox, QPushButton,
@@ -23,11 +24,13 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 # Импорт из gui/source: добавляем корень проекта в path
+import re
 _gui_dir = os.path.dirname(os.path.abspath(__file__))
 _root_dir = os.path.dirname(_gui_dir)
 if _root_dir not in sys.path:
     sys.path.insert(0, _root_dir)
 from gui.source.model_io import load_velocity_from_segy
+from gui.source import snapshot_io
 from gui.source.simlib_first_order import (
     ricker,
     fd2d_forward_first_order,
@@ -52,6 +55,15 @@ def _get_process_memory_mb():
         return psutil.Process().memory_info().rss / (1024 * 1024)
     except Exception:
         return None
+
+
+def _get_snapshots_h5_path(base_dir, run_name, run_type="forward"):
+    """Путь к HDF5 снапшотов: base_dir/snapshots/<fwd|bwd>_<sanitized_name>.h5"""
+    safe = re.sub(r"[^\w\-]", "_", (run_name or "run").strip()) or "run"
+    prefix = "fwd" if run_type == "forward" else "bwd"
+    snap_dir = os.path.join(base_dir, "snapshots")
+    os.makedirs(snap_dir, exist_ok=True)
+    return os.path.join(snap_dir, "{}_{}.h5".format(prefix, safe))
 
 
 def _get_system_memory_limit_mb(percent=0.85):
@@ -367,7 +379,7 @@ class SeismogramCanvas(FigureCanvas):
 
 
 class ModelParametersDialog(QDialog):
-    def __init__(self, dx, dz, parent=None):
+    def __init__(self, dx, dz, has_model=False, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Model — Parameters")
         layout = QFormLayout(self)
@@ -383,6 +395,11 @@ class ModelParametersDialog(QDialog):
         self.dz_spin.setValue(dz)
         self.dz_spin.setSuffix(" m")
         layout.addRow("dz (m):", self.dz_spin)
+        self.resample_check = QCheckBox("Resample")
+        self.resample_check.setChecked(False)
+        self.resample_check.setEnabled(bool(has_model))
+        self.resample_check.setToolTip("Сохранить текущие extents по X и Z, ресемплировать модель на новые dx, dz (2D интерполяция)")
+        layout.addRow("", self.resample_check)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -390,6 +407,9 @@ class ModelParametersDialog(QDialog):
 
     def get_dx_dz(self):
         return self.dx_spin.value(), self.dz_spin.value()
+
+    def get_resample(self):
+        return self.resample_check.isChecked()
 
 
 class SmoothDialog(QDialog):
@@ -412,6 +432,52 @@ class SmoothDialog(QDialog):
 
     def get_smooth_size_m(self):
         return self.size_spin.value()
+
+
+class CropDialog(QDialog):
+    """Model → Crop: обрезка модели по границам в метрах (0 = не обрезать)."""
+    def __init__(self, crop_x_left=0, crop_x_right=0, crop_z_top=0, crop_z_bottom=0, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Model — Crop")
+        layout = QFormLayout(self)
+        self.x_left_spin = QDoubleSpinBox()
+        self.x_left_spin.setRange(0, 1e7)
+        self.x_left_spin.setDecimals(1)
+        self.x_left_spin.setValue(crop_x_left)
+        self.x_left_spin.setSuffix(" m")
+        layout.addRow("Crop X Left:", self.x_left_spin)
+        self.x_right_spin = QDoubleSpinBox()
+        self.x_right_spin.setRange(0, 1e7)
+        self.x_right_spin.setDecimals(1)
+        self.x_right_spin.setValue(crop_x_right)
+        self.x_right_spin.setSuffix(" m")
+        layout.addRow("Crop X Right:", self.x_right_spin)
+        self.z_top_spin = QDoubleSpinBox()
+        self.z_top_spin.setRange(0, 1e7)
+        self.z_top_spin.setDecimals(1)
+        self.z_top_spin.setValue(crop_z_top)
+        self.z_top_spin.setSuffix(" m")
+        self.z_top_spin.setToolTip("Top = minimum Z (обрезать сверху)")
+        layout.addRow("Crop Z Top:", self.z_top_spin)
+        self.z_bottom_spin = QDoubleSpinBox()
+        self.z_bottom_spin.setRange(0, 1e7)
+        self.z_bottom_spin.setDecimals(1)
+        self.z_bottom_spin.setValue(crop_z_bottom)
+        self.z_bottom_spin.setSuffix(" m")
+        self.z_bottom_spin.setToolTip("Bottom = maximum Z (обрезать снизу)")
+        layout.addRow("Crop Z Bottom:", self.z_bottom_spin)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addRow(bb)
+
+    def get_crop_m(self):
+        return (
+            self.x_left_spin.value(),
+            self.x_right_spin.value(),
+            self.z_top_spin.value(),
+            self.z_bottom_spin.value(),
+        )
 
 
 class DiffractorDialog(QDialog):
@@ -875,7 +941,8 @@ class ForwardSimulationWorker(QObject):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, src, vp, nt, dt, dx, dz, xsrc, zsrc, n_absorb, save_every, order):
+    def __init__(self, src, vp, nt, dt, dx, dz, xsrc, zsrc, n_absorb, save_every, order,
+                 snapshots_h5_path=None, snapshot_dt_ms=None, tmax_ms=None):
         super().__init__()
         self._src = src
         self._vp = vp
@@ -888,6 +955,9 @@ class ForwardSimulationWorker(QObject):
         self._n_absorb = n_absorb
         self._save_every = save_every
         self._order = order
+        self._snapshots_h5_path = snapshots_h5_path
+        self._snapshot_dt_ms = snapshot_dt_ms
+        self._tmax_ms = tmax_ms
 
     def run(self):
         try:
@@ -907,6 +977,9 @@ class ForwardSimulationWorker(QObject):
                 return_vx=True,
                 order=self._order,
                 progress_callback=lambda i, n: self.progress.emit(i, n),
+                snapshots_h5_path=self._snapshots_h5_path,
+                snapshot_dt_ms=self._snapshot_dt_ms,
+                tmax_ms=self._tmax_ms,
             )
             self.finished.emit(result)
         except Exception as e:
@@ -919,7 +992,8 @@ class BackwardSimulationWorker(QObject):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, record, vp, nt, dt, dx, dz, xrec, zrec, n_absorb, save_every, order):
+    def __init__(self, record, vp, nt, dt, dx, dz, xrec, zrec, n_absorb, save_every, order,
+                 snapshots_h5_path=None, snapshot_dt_ms=None, tmax_ms=None, seismogram_source=None):
         super().__init__()
         self._record = record
         self._vp = vp
@@ -932,6 +1006,10 @@ class BackwardSimulationWorker(QObject):
         self._n_absorb = n_absorb
         self._save_every = save_every
         self._order = order
+        self._snapshots_h5_path = snapshots_h5_path
+        self._snapshot_dt_ms = snapshot_dt_ms
+        self._tmax_ms = tmax_ms
+        self._seismogram_source = seismogram_source
 
     def run(self):
         try:
@@ -951,6 +1029,10 @@ class BackwardSimulationWorker(QObject):
                 return_vx=True,
                 order=self._order,
                 progress_callback=lambda i, n: self.progress.emit(i, n),
+                snapshots_h5_path=self._snapshots_h5_path,
+                snapshot_dt_ms=self._snapshot_dt_ms,
+                tmax_ms=self._tmax_ms,
+                seismogram_source=self._seismogram_source,
             )
             self.finished.emit(result)
         except Exception as e:
@@ -989,6 +1071,11 @@ class MainWindow(QMainWindow):
         self._receiver_layout = "Profile"  # "Profile" или "Well" — для осей сейсмограммы
         self._project_path = None  # путь к текущему файлу проекта (.ini) или None
         self._model_file_path = ""  # путь к загруженному SEG-Y модели
+        self._vp_full = None  # оригинальная модель до кропа (референс для Crop)
+        self._crop_x_left = 0.0
+        self._crop_x_right = 0.0
+        self._crop_z_top = 0.0
+        self._crop_z_bottom = 0.0
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1107,6 +1194,9 @@ class MainWindow(QMainWindow):
         act_params = QAction("Parameters", self)
         act_params.triggered.connect(self._model_parameters)
         model_menu.addAction(act_params)
+        act_crop = QAction("Crop", self)
+        act_crop.triggered.connect(self._model_crop)
+        model_menu.addAction(act_crop)
         act_diff = QAction("Diffractors", self)
         act_diff.triggered.connect(self._model_diffractors)
         model_menu.addAction(act_diff)
@@ -1455,7 +1545,12 @@ class MainWindow(QMainWindow):
             comp = self._snapshot_combo.currentText()
             arr = self._snapshots.get(comp)
             if arr is not None and arr.size > 0:
-                snapshot_vmin, snapshot_vmax = np.percentile(arr, [100 - p_snap, p_snap])
+                # Для H5 не грузим весь массив (OOM): берём выборку кадров для percentile
+                if hasattr(arr, "read_full"):
+                    arr_p = snapshot_io.sample_frames_for_percentile(arr._path, arr._dset_name)
+                else:
+                    arr_p = arr
+                snapshot_vmin, snapshot_vmax = np.percentile(arr_p, [100 - p_snap, p_snap])
                 if snapshot_vmax <= snapshot_vmin:
                     snapshot_vmax = snapshot_vmin + 1.0
         p_img = self._image_percentile_spin.value()
@@ -1506,16 +1601,22 @@ class MainWindow(QMainWindow):
             self, "Load Project", "", "Project (*.ini);;All (*)")
         if not path:
             return
+        file_name = os.path.basename(path)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.statusBar().showMessage("Loading project {}...".format(file_name))
         try:
             self._load_project_from_ini(path)
             self._project_path = path
-            self.setWindowTitle("Sim1Shot2D — " + os.path.basename(path))
+            self.setWindowTitle("Sim1Shot2D — " + file_name)
         except Exception as e:
             import traceback
             QMessageBox.warning(
                 self, "Load Project",
                 "Failed to load project:\n\n{}".format(e))
             traceback.print_exc()
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().clearMessage()
 
     def _file_save_project(self):
         if self._project_path is None:
@@ -1561,6 +1662,10 @@ class MainWindow(QMainWindow):
         cfg.set("model", "dx", str(self._dx))
         cfg.set("model", "dz", str(self._dz))
         cfg.set("model", "smooth_size_m", str(self._smooth_size_m))
+        cfg.set("model", "crop_x_left", str(getattr(self, "_crop_x_left", 0)))
+        cfg.set("model", "crop_x_right", str(getattr(self, "_crop_x_right", 0)))
+        cfg.set("model", "crop_z_top", str(getattr(self, "_crop_z_top", 0)))
+        cfg.set("model", "crop_z_bottom", str(getattr(self, "_crop_z_bottom", 0)))
         cfg.set("model", "diffractor_count", str(len(self._diffractors)))
         for i, d in enumerate(self._diffractors):
             cfg.set("model", "diffractor_{}_x".format(i), str(d["x"]))
@@ -1607,6 +1712,47 @@ class MainWindow(QMainWindow):
         for k, v in self._sim_settings.items():
             cfg.set("simulation", k, str(v))
 
+        base_dir = os.path.dirname(os.path.abspath(path))
+        fwd_with_h5 = [r for r in (self._forward_runs or []) if r.get("snapshots_path")]
+        bwd_with_h5 = [r for r in (self._backward_runs or []) if r.get("snapshots_path")]
+        if fwd_with_h5 or bwd_with_h5:
+            cfg.add_section("runs")
+            cfg.set("runs", "forward_count", str(len(fwd_with_h5)))
+            for i, r in enumerate(fwd_with_h5):
+                cfg.set("runs", "forward_{}_name".format(i), r["name"])
+                rel = r["snapshots_path"]
+                if os.path.isabs(rel):
+                    try:
+                        rel = os.path.relpath(rel, base_dir)
+                    except ValueError:
+                        rel = os.path.basename(rel)
+                cfg.set("runs", "forward_{}_path".format(i), rel)
+            cfg.set("runs", "backward_count", str(len(bwd_with_h5)))
+            for i, r in enumerate(bwd_with_h5):
+                cfg.set("runs", "backward_{}_name".format(i), r["name"])
+                rel = r["snapshots_path"]
+                if os.path.isabs(rel):
+                    try:
+                        rel = os.path.relpath(rel, base_dir)
+                    except ValueError:
+                        rel = os.path.basename(rel)
+                cfg.set("runs", "backward_{}_path".format(i), rel)
+                cfg.set("runs", "backward_{}_seismogram_source".format(i), r.get("seismogram_source", ""))
+            if self._current_fwd_name:
+                cfg.set("runs", "current_fwd_name", self._current_fwd_name)
+            if self._current_bwd_name:
+                cfg.set("runs", "current_bwd_name", self._current_bwd_name)
+            if self._current_seismogram_name:
+                cfg.set("runs", "current_seismogram_name", self._current_seismogram_name)
+        if self._rtm_image is not None and self._rtm_image.size > 0:
+            if not cfg.has_section("runs"):
+                cfg.add_section("runs")
+            snap_dir = os.path.join(base_dir, "snapshots")
+            os.makedirs(snap_dir, exist_ok=True)
+            rtm_path = os.path.join(snap_dir, "rtm_image.npy")
+            np.save(rtm_path, self._rtm_image.astype(np.float64))
+            cfg.set("runs", "rtm_file", "snapshots/rtm_image.npy")
+
         with open(path, "w", encoding="utf-8") as f:
             cfg.write(f)
 
@@ -1615,18 +1761,46 @@ class MainWindow(QMainWindow):
         cfg.read(path, encoding="utf-8")
         base_dir = os.path.dirname(os.path.abspath(path))
 
+        # Сброс буферов сейсмограмм, снапшотов и визуализации
+        self._forward_runs = []
+        self._backward_runs = []
+        self._current_fwd_name = None
+        self._current_bwd_name = None
+        self._current_seismogram_name = None
+        self._snapshots = None
+        self._seismogram_data = None
+        self._seismogram_t_ms = None
+        self._rtm_image = None
+        self._rtm_image_base = None
+        self.canvas.set_snapshot_2d(None)
+        self.canvas.set_rtm_image(None)
+        if hasattr(self, "seismogram_canvas") and self.seismogram_canvas is not None:
+            self.seismogram_canvas.set_seismogram(None, None, [], getattr(self, "_receiver_layout", "Profile"), self._dx, self._dz)
+
         if cfg.has_section("model"):
+            # Сброс модели, чтобы при отсутствии/ошибке файла не показывать старую модель с чужим кропом
+            self._vp_full = None
+            self._vp = None
+            self._model_file_path = None
             model_file = cfg.get("model", "file", fallback="").strip()
             if model_file and not os.path.isabs(model_file):
                 model_file = os.path.normpath(os.path.join(base_dir, model_file))
             if model_file and os.path.isfile(model_file):
                 vp, dx_load, dz_load = load_velocity_from_segy(model_file)
                 if vp is not None:
-                    self._vp = vp
+                    self._vp_full = np.asarray(vp, dtype=np.float64, copy=True)
+                    self._vp = self._vp_full
                     self._model_file_path = os.path.abspath(model_file)
             self._dx = cfg.getfloat("model", "dx", fallback=self._dx)
             self._dz = cfg.getfloat("model", "dz", fallback=self._dz)
             self._smooth_size_m = cfg.getfloat("model", "smooth_size_m", fallback=0.0)
+            self._crop_x_left = cfg.getfloat("model", "crop_x_left", fallback=0.0)
+            self._crop_x_right = cfg.getfloat("model", "crop_x_right", fallback=0.0)
+            self._crop_z_top = cfg.getfloat("model", "crop_z_top", fallback=0.0)
+            self._crop_z_bottom = cfg.getfloat("model", "crop_z_bottom", fallback=0.0)
+            # Отладка: значения кропа из project-файла
+            print("[Crop load] project file crop: crop_x_left={}, crop_x_right={}, crop_z_top={}, crop_z_bottom={}".format(
+                self._crop_x_left, self._crop_x_right, self._crop_z_top, self._crop_z_bottom))
             n_diff = cfg.getint("model", "diffractor_count", fallback=0)
             self._diffractors = []
             for i in range(n_diff):
@@ -1636,6 +1810,35 @@ class MainWindow(QMainWindow):
                     "r": cfg.getfloat("model", "diffractor_{}_r".format(i)),
                     "v": cfg.getfloat("model", "diffractor_{}_v".format(i)),
                 })
+            # Применить кроп сразу после загрузки модели (координаты survey уже в обрезанной системе)
+            if self._vp_full is not None:
+                nz_full, nx_full = self._vp_full.shape
+                dx, dz = self._dx, self._dz
+                if dx <= 0:
+                    dx = 1.0
+                if dz <= 0:
+                    dz = 1.0
+                ix0 = max(0, min(nx_full - 1, int(round(self._crop_x_left / dx))))
+                ix1 = max(ix0, min(nx_full - 1, nx_full - 1 - int(round(self._crop_x_right / dx))))
+                j0 = max(0, min(nz_full - 1, int(round(self._crop_z_top / dz))))
+                j1 = max(j0, min(nz_full - 1, nz_full - 1 - int(round(self._crop_z_bottom / dz))))
+                # Отладка: размеры и координаты оригинальной модели
+                x_min_full = 0.0
+                x_max_full = (nx_full - 1) * dx
+                z_min_full = 0.0
+                z_max_full = (nz_full - 1) * dz
+                print("[Crop load] original model: nx={}, nz={}; x=[{}, {}] m, z=[{}, {}] m; dx={}, dz={}".format(
+                    nx_full, nz_full, x_min_full, x_max_full, z_min_full, z_max_full, dx, dz))
+                # Отладка: индексы и размеры после кропа
+                nz_crop = j1 - j0 + 1
+                nx_crop = ix1 - ix0 + 1
+                x_min_crop = ix0 * dx
+                x_max_crop = ix1 * dx
+                z_min_crop = j0 * dz
+                z_max_crop = j1 * dz
+                print("[Crop load] after crop: ix0={}, ix1={}, j0={}, j1={}; nx={}, nz={}; x=[{}, {}] m, z=[{}, {}] m".format(
+                    ix0, ix1, j0, j1, nx_crop, nz_crop, x_min_crop, x_max_crop, z_min_crop, z_max_crop))
+                self._vp = np.asarray(self._vp_full[j0 : j1 + 1, ix0 : ix1 + 1], dtype=np.float64, copy=True)
 
         if cfg.has_section("survey"):
             sx = cfg.getfloat("survey", "source_x", fallback=0)
@@ -1667,7 +1870,66 @@ class MainWindow(QMainWindow):
             self._sim_settings["laplacian"] = cfg.get("simulation", "laplacian", fallback=self._sim_settings["laplacian"]).strip()
             self._last_model_source = cfg.get("simulation", "model_source", fallback="Original").strip()
 
+        # Подгрузка насчитанных снапшотов/сейсмограмм и RTM из проекта (H5 — только ссылки, первый кадр по требованию)
+        if cfg.has_section("runs"):
+            n_fwd = cfg.getint("runs", "forward_count", fallback=0)
+            for i in range(n_fwd):
+                name = cfg.get("runs", "forward_{}_name".format(i), fallback="")
+                rel_path = cfg.get("runs", "forward_{}_path".format(i), fallback="").strip()
+                if not name or not rel_path:
+                    continue
+                full_path = os.path.normpath(os.path.join(base_dir, rel_path)) if not os.path.isabs(rel_path) else rel_path
+                if not os.path.isfile(full_path):
+                    continue
+                seismogram_data, seismogram_t_ms = snapshot_io.compute_seismogram_from_h5(
+                    full_path, self._receivers, self._dx, self._dz,
+                    snapshot_dt_ms=self._sim_settings.get("snapshot_dt_ms", 2.0),
+                )
+                snapshots = snapshot_io.snapshots_dict_from_h5(full_path, "forward")
+                self._forward_runs.append({
+                    "name": name,
+                    "snapshots_path": full_path,
+                    "snapshots": snapshots,
+                    "seismogram_data": seismogram_data,
+                    "seismogram_t_ms": seismogram_t_ms,
+                })
+            n_bwd = cfg.getint("runs", "backward_count", fallback=0)
+            for i in range(n_bwd):
+                name = cfg.get("runs", "backward_{}_name".format(i), fallback="")
+                rel_path = cfg.get("runs", "backward_{}_path".format(i), fallback="").strip()
+                seis_src = cfg.get("runs", "backward_{}_seismogram_source".format(i), fallback="")
+                if not name or not rel_path:
+                    continue
+                full_path = os.path.normpath(os.path.join(base_dir, rel_path)) if not os.path.isabs(rel_path) else rel_path
+                if not os.path.isfile(full_path):
+                    continue
+                snapshots = snapshot_io.snapshots_dict_from_h5(full_path, "backward")
+                self._backward_runs.append({
+                    "name": name,
+                    "snapshots_path": full_path,
+                    "snapshots": snapshots,
+                    "seismogram_source": seis_src,
+                })
+            self._current_fwd_name = cfg.get("runs", "current_fwd_name", fallback="").strip() or (self._forward_runs[0]["name"] if self._forward_runs else None)
+            self._current_bwd_name = cfg.get("runs", "current_bwd_name", fallback="").strip() or (self._backward_runs[0]["name"] if self._backward_runs else None)
+            self._current_seismogram_name = cfg.get("runs", "current_seismogram_name", fallback="").strip() or (self._forward_runs[0]["name"] if self._forward_runs else None)
+            rtm_rel = cfg.get("runs", "rtm_file", fallback="").strip()
+            if rtm_rel:
+                rtm_full = os.path.normpath(os.path.join(base_dir, rtm_rel))
+                if os.path.isfile(rtm_full):
+                    try:
+                        img = np.load(rtm_full)
+                        self._rtm_image = np.asarray(img, dtype=np.float64)
+                        self._rtm_image_base = self._rtm_image.copy()
+                    except Exception:
+                        pass
+
         self._apply_velocity_to_canvas()
+        self._refresh_current_combos()
+        self._apply_current_seismogram()
+        self._rebuild_effective_snapshots()
+        self._update_layer_availability()
+        self._update_memory_status()
 
     def _model_open(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1693,9 +1955,12 @@ class MainWindow(QMainWindow):
         if vp is None:
             QMessageBox.warning(self, "Error", "Failed to load model from file.")
             return
-        self._vp = vp
+        self._vp_full = np.asarray(vp, dtype=np.float64, copy=True)
+        self._vp = self._vp_full
         self._dx, self._dz = dx, dz
         self._model_file_path = path
+        self._crop_x_left = self._crop_x_right = 0.0
+        self._crop_z_top = self._crop_z_bottom = 0.0
         self._apply_velocity_to_canvas()
 
     def _apply_velocity_to_canvas(self):
@@ -1737,10 +2002,66 @@ class MainWindow(QMainWindow):
         self._update_canvas_layers()
 
     def _model_parameters(self):
-        dlg = ModelParametersDialog(self._dx, self._dz, self)
-        if dlg.exec_() == QDialog.Accepted:
-            self._dx, self._dz = dlg.get_dx_dz()
-            self._apply_velocity_to_canvas()
+        has_model = self._vp is not None and self._vp.size > 0
+        dlg = ModelParametersDialog(self._dx, self._dz, has_model=has_model, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        has_runs = len(self._forward_runs) > 0 or len(self._backward_runs) > 0
+        has_rtm = self._rtm_image is not None and self._rtm_image.size > 0
+        if has_runs or has_rtm:
+            reply = QMessageBox.warning(
+                self,
+                "Model Parameters",
+                "Snapshots, seismograms and RTM will be removed. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        dx_new, dz_new = dlg.get_dx_dz()
+        resample = has_model and dlg.get_resample()
+        if resample and self._vp is not None and self._vp_full is not None:
+            extent_x = (self._vp.shape[1] - 1) * self._dx
+            extent_z = (self._vp.shape[0] - 1) * self._dz
+            nx_new = max(2, int(round(extent_x / dx_new)) + 1)
+            nz_new = max(2, int(round(extent_z / dz_new)) + 1)
+            x_new_arr = np.linspace(0, extent_x, nx_new)
+            z_new_arr = np.linspace(0, extent_z, nz_new)
+            for arr, name in ((self._vp_full, "_vp_full"), (self._vp, "_vp")):
+                arr = np.asarray(arr, dtype=np.float64)
+                nz_old, nx_old = arr.shape
+                x_old = np.linspace(0, extent_x, nx_old)
+                z_old = np.linspace(0, extent_z, nz_old)
+                interp = RegularGridInterpolator(
+                    (x_old, z_old),
+                    arr.T,
+                    method="linear",
+                    bounds_error=False,
+                    fill_value=None,
+                )
+                xx, zz = np.meshgrid(x_new_arr, z_new_arr, indexing="ij")
+                pts = np.column_stack([xx.ravel(), zz.ravel()])
+                resampled = interp(pts).reshape(nx_new, nz_new).T
+                setattr(self, name, np.asarray(resampled, dtype=np.float64))
+            self._dx, self._dz = dx_new, dz_new
+        else:
+            self._dx, self._dz = dx_new, dz_new
+        self._forward_runs = []
+        self._backward_runs = []
+        self._current_fwd_name = None
+        self._current_bwd_name = None
+        self._current_seismogram_name = None
+        self._snapshots = None
+        self._seismogram_data = None
+        self._seismogram_t_ms = None
+        self._rtm_image = None
+        self._rtm_image_base = None
+        self._apply_velocity_to_canvas()
+        self._refresh_current_combos()
+        self._apply_current_seismogram()
+        self._rebuild_effective_snapshots()
+        self._update_layer_availability()
+        self._update_memory_status()
 
     def _model_diffractors(self):
         dlg = DiffractorsDialog(self._diffractors, self)
@@ -1753,6 +2074,94 @@ class MainWindow(QMainWindow):
         if dlg.exec_() == QDialog.Accepted:
             self._smooth_size_m = dlg.get_smooth_size_m()
             self._apply_velocity_to_canvas()
+
+    def _model_crop(self):
+        if self._vp_full is None or self._vp_full.size == 0:
+            QMessageBox.warning(self, "Crop", "Load model first (Model → Open).")
+            return
+        dlg = CropDialog(
+            self._crop_x_left, self._crop_x_right,
+            self._crop_z_top, self._crop_z_bottom,
+            self,
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        x_left, x_right, z_top, z_bottom = dlg.get_crop_m()
+        if x_left == 0 and x_right == 0 and z_top == 0 and z_bottom == 0:
+            return
+        has_runs = len(self._forward_runs) > 0 or len(self._backward_runs) > 0
+        has_rtm = self._rtm_image is not None and self._rtm_image.size > 0
+        if has_runs or has_rtm:
+            reply = QMessageBox.warning(
+                self,
+                "Crop",
+                "Snapshots, seismograms and RTM will be removed. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        nz_full, nx_full = self._vp_full.shape
+        dx, dz = self._dx, self._dz
+        ix0 = int(round(x_left / dx))
+        ix1 = nx_full - 1 - int(round(x_right / dx))
+        j0 = int(round(z_top / dz))
+        j1 = nz_full - 1 - int(round(z_bottom / dz))
+        if ix0 > ix1 or j0 > j1:
+            QMessageBox.warning(
+                self, "Crop",
+                "Invalid crop: would leave no model. Reduce crop values.",
+            )
+            return
+        self._vp = np.asarray(self._vp_full[j0 : j1 + 1, ix0 : ix1 + 1], dtype=np.float64, copy=True)
+        new_shift_x = ix0 * dx
+        new_shift_z = j0 * dz
+        prev_ix0 = int(round(self._crop_x_left / dx))
+        prev_j0 = int(round(self._crop_z_top / dz))
+        prev_shift_x = prev_ix0 * dx
+        prev_shift_z = prev_j0 * dz
+        nx_new, nz_new = ix1 - ix0 + 1, j1 - j0 + 1
+        x_max = (nx_new - 1) * dx
+        z_max = (nz_new - 1) * dz
+        if self._source is not None:
+            sx, sz, freq = self._source[0], self._source[1], self._source[2]
+            sx_new = sx + prev_shift_x - new_shift_x
+            sz_new = sz + prev_shift_z - new_shift_z
+            if 0 <= sx_new <= x_max and 0 <= sz_new <= z_max:
+                self._source = (sx_new, sz_new, freq)
+            else:
+                self._source = None
+        self._receivers = [
+            (x + prev_shift_x - new_shift_x, z + prev_shift_z - new_shift_z)
+            for x, z in self._receivers
+            if 0 <= (x + prev_shift_x - new_shift_x) <= x_max and 0 <= (z + prev_shift_z - new_shift_z) <= z_max
+        ]
+        self._diffractors = [
+            {**d, "x": d["x"] + prev_shift_x - new_shift_x, "z": d["z"] + prev_shift_z - new_shift_z}
+            for d in self._diffractors
+            if 0 <= (d["x"] + prev_shift_x - new_shift_x) <= x_max and 0 <= (d["z"] + prev_shift_z - new_shift_z) <= z_max
+        ]
+        self._crop_x_left = x_left
+        self._crop_x_right = x_right
+        self._crop_z_top = z_top
+        self._crop_z_bottom = z_bottom
+        self._forward_runs = []
+        self._backward_runs = []
+        self._current_fwd_name = None
+        self._current_bwd_name = None
+        self._current_seismogram_name = None
+        self._snapshots = None
+        self._seismogram_data = None
+        self._seismogram_t_ms = None
+        self._rtm_image = None
+        self._rtm_image_base = None
+        self._apply_velocity_to_canvas()
+        self._refresh_current_combos()
+        self._apply_current_seismogram()
+        self._rebuild_effective_snapshots()
+        self._update_layer_availability()
+        self._update_memory_status()
+        QMessageBox.information(self, "Crop", "Model cropped. NX={}, NZ={}.".format(nx_new, nz_new))
 
     def apply_diffractors_and_redraw(self, diffractors):
         self._diffractors = list(diffractors)
@@ -1863,10 +2272,16 @@ class MainWindow(QMainWindow):
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%v / %m")
 
+        base_dir = os.path.dirname(os.path.abspath(self._project_path)) if self._project_path else _root_dir
+        snap_h5_path = _get_snapshots_h5_path(base_dir, self._pending_forward_name, "forward")
+
         self._forward_thread = QThread()
         self._forward_worker = ForwardSimulationWorker(
             src, vp_sim, nt, dt_s, self._dx, self._dz,
             sx, sz, npml, save_every, order,
+            snapshots_h5_path=snap_h5_path,
+            snapshot_dt_ms=snapshot_dt_ms,
+            tmax_ms=tmax_ms,
         )
         self._forward_worker.moveToThread(self._forward_thread)
         self._forward_worker.progress.connect(self._on_forward_progress)
@@ -1910,26 +2325,60 @@ class MainWindow(QMainWindow):
         self._forward_worker = None
         self._progress_bar.setValue(self._progress_bar.maximum())
         if result is not None and self._pending_forward_name:
-            p_history, vx_history, vz_history = result
-            seismogram_data, seismogram_t_ms = self._compute_seismogram_from_snapshots(p_history)
             name = self._pending_forward_name
-            self._forward_runs = [r for r in self._forward_runs if r["name"] != name]
-            self._forward_runs.append({
-                "name": name,
-                "snapshots": {"P fwd": p_history, "Vz fwd": vz_history, "Vx fwd": vx_history},
-                "seismogram_data": seismogram_data,
-                "seismogram_t_ms": seismogram_t_ms,
-            })
+            # Результат — либо (path,) при записи в HDF5, либо (p_history, vx_history, vz_history)
+            if len(result) == 1 and isinstance(result[0], str):
+                h5_path = result[0]
+                # Сейсмограмму считаем по кадрам из HDF5, не загружая весь P в память (избегаем OOM)
+                def _seismogram_progress(current, total):
+                    self._progress_bar.setMaximum(total)
+                    self._progress_bar.setValue(current)
+                    self._progress_bar.setFormat("Seismogram %v / %m")
+                    QApplication.processEvents()
+                seismogram_data, seismogram_t_ms = snapshot_io.compute_seismogram_from_h5(
+                    h5_path, self._receivers, self._dx, self._dz,
+                    snapshot_dt_ms=self._sim_settings.get("snapshot_dt_ms", 2.0),
+                    progress_callback=_seismogram_progress,
+                )
+                print("[Forward] seismogram from H5 done", flush=True)
+                snapshots = snapshot_io.snapshots_dict_from_h5(h5_path, "forward")
+                print("[Forward] snapshots_dict_from_h5 done", flush=True)
+                self._forward_runs = [r for r in self._forward_runs if r["name"] != name]
+                self._forward_runs.append({
+                    "name": name,
+                    "snapshots_path": h5_path,
+                    "snapshots": snapshots,
+                    "seismogram_data": seismogram_data,
+                    "seismogram_t_ms": seismogram_t_ms,
+                })
+                print("[Forward] run appended", flush=True)
+            else:
+                p_history, vx_history, vz_history = result
+                seismogram_data, seismogram_t_ms = self._compute_seismogram_from_snapshots(p_history)
+                self._forward_runs = [r for r in self._forward_runs if r["name"] != name]
+                self._forward_runs.append({
+                    "name": name,
+                    "snapshots": {"P fwd": p_history, "Vz fwd": vz_history, "Vx fwd": vx_history},
+                    "seismogram_data": seismogram_data,
+                    "seismogram_t_ms": seismogram_t_ms,
+                })
+                print("[Forward] run appended (in-memory)", flush=True)
             self._current_fwd_name = name
             self._current_seismogram_name = name
             self._pending_forward_name = None
+            print("[Forward] rebuild_effective_snapshots...", flush=True)
             self._rebuild_effective_snapshots()
+            print("[Forward] apply_current_seismogram...", flush=True)
             self._apply_current_seismogram()
+            print("[Forward] update_layer_availability...", flush=True)
             self._snapshot_slider.setValue(0)
             self._chk_snapshots.setChecked(True)
             self._update_layer_availability()
+            print("[Forward] update_memory_status...", flush=True)
             self._update_memory_status()
+            print("[Forward] maybe_reduce_memory...", flush=True)
             self._maybe_reduce_memory()
+            print("[Forward] done, showing dialog", flush=True)
         QMessageBox.information(self, "Run Forward", "Forward run completed.")
 
     def _on_forward_error(self, err_msg):
@@ -2072,10 +2521,17 @@ class MainWindow(QMainWindow):
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%v / %m")
 
+        base_dir = os.path.dirname(os.path.abspath(self._project_path)) if self._project_path else _root_dir
+        snap_h5_path = _get_snapshots_h5_path(base_dir, self._pending_backward_name, "backward")
+
         self._backward_thread = QThread()
         self._backward_worker = BackwardSimulationWorker(
             record, vp_sim, nt, dt_s, self._dx, self._dz,
             xrec, zrec, npml, save_every, order,
+            snapshots_h5_path=snap_h5_path,
+            snapshot_dt_ms=snapshot_dt_ms,
+            tmax_ms=tmax_ms,
+            seismogram_source=self._pending_backward_seismogram_name,
         )
         self._backward_worker.moveToThread(self._backward_thread)
         self._backward_worker.progress.connect(self._on_forward_progress)
@@ -2092,14 +2548,26 @@ class MainWindow(QMainWindow):
         self._backward_worker = None
         self._progress_bar.setValue(self._progress_bar.maximum())
         if result is not None and self._pending_backward_name:
-            p_history, vx_history, vz_history = result
             name = self._pending_backward_name
-            self._backward_runs = [r for r in self._backward_runs if r["name"] != name]
-            self._backward_runs.append({
-                "name": name,
-                "snapshots": {"P bwd": p_history, "Vz bwd": vz_history, "Vx bwd": vx_history},
-                "seismogram_source": self._pending_backward_seismogram_name,
-            })
+            seismogram_src = self._pending_backward_seismogram_name
+            if len(result) == 1 and isinstance(result[0], str):
+                h5_path = result[0]
+                snapshots = snapshot_io.snapshots_dict_from_h5(h5_path, "backward")
+                self._backward_runs = [r for r in self._backward_runs if r["name"] != name]
+                self._backward_runs.append({
+                    "name": name,
+                    "snapshots_path": h5_path,
+                    "snapshots": snapshots,
+                    "seismogram_source": seismogram_src,
+                })
+            else:
+                p_history, vx_history, vz_history = result
+                self._backward_runs = [r for r in self._backward_runs if r["name"] != name]
+                self._backward_runs.append({
+                    "name": name,
+                    "snapshots": {"P bwd": p_history, "Vz bwd": vz_history, "Vx bwd": vx_history},
+                    "seismogram_source": seismogram_src,
+                })
             self._current_bwd_name = name
             self._pending_backward_name = None
             self._pending_backward_seismogram_name = None
@@ -2167,21 +2635,35 @@ class MainWindow(QMainWindow):
                 "No «{}» snapshots in selected runs.".format(src),
             )
             return
-        fwd = np.asarray(fwd, dtype=np.float64)
-        bwd = np.asarray(bwd, dtype=np.float64)
-        if fwd.shape != bwd.shape:
+        fwd_source = (fwd._path, fwd._dset_name) if hasattr(fwd, "read_full") else np.asarray(fwd, dtype=np.float64)
+        bwd_source = (bwd._path, bwd._dset_name) if hasattr(bwd, "read_full") else np.asarray(bwd, dtype=np.float64)
+
+        def _source_shape(src):
+            if isinstance(src, np.ndarray):
+                return src.shape
+            meta = snapshot_io.read_snapshots_metadata(src[0])
+            return (meta["n_save"], meta["nx"], meta["nz"])
+
+        if _source_shape(fwd_source) != _source_shape(bwd_source):
             QMessageBox.warning(
                 self, "RTM Build",
                 "Forward and backward snapshot dimensions do not match.",
             )
             return
-        # Backward снапшоты в обратном времени — переворачиваем по оси t перед перемножением
-        bwd = bwd[::-1]
-        # Кросс-корреляция по времени (zero-lag): image_xy = sum_t fwd[t] * bwd[t]
-        image_xy = np.sum(fwd * bwd, axis=0)
+
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("RTM Build %v / %m")
+
+        def _rtm_progress(current, total):
+            self._progress_bar.setMaximum(total)
+            self._progress_bar.setValue(current)
+            QApplication.processEvents()
+
+        image_xy = snapshot_io.build_rtm_image(fwd_source, bwd_source, progress_callback=_rtm_progress)
         if image_xy.ndim != 2:
             QMessageBox.warning(self, "RTM Build", "Expected 2D slice.")
             return
+        self._progress_bar.setValue(self._progress_bar.maximum())
         self._rtm_image_base = image_xy.T.copy()
         self._rtm_image = image_xy.T.copy()
         self.canvas.set_rtm_image(self._rtm_image)
