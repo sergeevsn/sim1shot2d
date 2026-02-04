@@ -26,16 +26,18 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-# Импорт из gui/source: добавляем корень проекта в path
+# Импорт из source: каталог с main.py в path, чтобы работало и из gui/, и из корня репо
 import re
 _gui_dir = os.path.dirname(os.path.abspath(__file__))
 _root_dir = os.path.dirname(_gui_dir)
+if _gui_dir not in sys.path:
+    sys.path.insert(0, _gui_dir)
 if _root_dir not in sys.path:
     sys.path.insert(0, _root_dir)
 import segyio
-from gui.source.model_io import load_velocity_from_segy
-from gui.source import snapshot_io
-from gui.source.simlib_first_order import (
+from source.model_io import load_velocity_from_segy
+from source import snapshot_io
+from source.simlib_first_order import (
     ricker,
     fd2d_forward_first_order,
     fd2d_backward_first_order,

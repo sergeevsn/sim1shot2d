@@ -22,7 +22,7 @@ Installation & Run
 
    ```bash
    git clone https://github.com/sergeevsn/sim1shot2d.git
-   cd sim1shot2d/gui
+   cd sim1shot2d
    ```
 
 2. Create a virtual environment (recommended) and install dependencies:
