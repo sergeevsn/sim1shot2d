@@ -1,8 +1,7 @@
 """
-Симуляция акустики 1-го порядка (система скорость–давление).
-Схема Вирьё (Staggered Grid): 2-й порядок по времени, 2-й по пространству.
+Acoustic 1st‑order simulation (velocity–pressure system).
 
-Уравнения:
+Equations:
   ∂vx/∂t = - (1/ρ) ∂P/∂x
   ∂vz/∂t = - (1/ρ) ∂P/∂z
   ∂P/∂t  = - ρ c² (∂vx/∂x + ∂vz/∂z)
@@ -15,7 +14,7 @@ from scipy.ndimage import gaussian_filter
 
 
 def ricker(f_hz, nt, dt, t0=None):
-    """Вейвлет Рикера; f_hz — доминантная частота (Гц), nt — число отсчётов, dt — шаг по времени (с)."""
+    """Ricker wavelet; f_hz — dominant frequency (Hz), nt — number of samples, dt — time step (s)."""
     t = np.arange(nt, dtype=np.float32) * dt
     if t0 is None:
         t0 = 1.0 / f_hz
@@ -25,9 +24,17 @@ def ricker(f_hz, nt, dt, t0=None):
 
 def prepare_migration_velocity(vp_true, sigma_meters, dx, dz):
     """
-    Сглаживает скоростную модель 2D gaussian filter.
-    vp_true: (nx, nz). sigma_meters: радиус сглаживания в метрах.
-    Возвращает vp_mig той же формы (nx, nz).
+    Smooth 2D velocity model with a Gaussian filter.
+
+    vp_true : (nx, nz)
+        True P‑wave velocity model.
+    sigma_meters : float
+        Smoothing radius in meters.
+
+    Returns
+    -------
+    vp_mig : (nx, nz)
+        Smoothed velocity model of the same shape as vp_true.
     """
     sigma_x = sigma_meters / dx
     sigma_z = sigma_meters / dz
@@ -37,9 +44,15 @@ def prepare_migration_velocity(vp_true, sigma_meters, dx, dz):
 
 def _inject_record_interp(p_it, record_vals, xrec, zrec, dx, dz, n_absorb, scale):
     """
-    Добавляет к полю давления p_it запись с позиций приёмников (xrec, zrec).
-    При коллинеарных точках — инжекция в ближайшие узлы; иначе — griddata (linear).
-    scale: множитель (для 1-го порядка используем dt).
+    Add recorded pressure samples into the pressure field `p_it` at receiver positions (xrec, zrec).
+
+    For collinear receivers injection is done into the nearest grid nodes; otherwise
+    interpolation is performed with `griddata(..., method=\"linear\")`.
+
+    Parameters
+    ----------
+    scale : float
+        Scaling factor (for the 1st‑order scheme we usually pass dt here).
     """
     nx, nz = p_it.shape
     xrec = np.asarray(xrec, dtype=np.float64).ravel()
@@ -75,14 +88,16 @@ def _inject_record_interp(p_it, record_vals, xrec, zrec, dx, dz, n_absorb, scale
 @jit(nopython=True)
 def update_velocity_stress_staggered(p, vx, vz, vp, rho, dt, dx, dz, nx, nz):
     """
-    Обновление полей на разнесённой сетке (Staggered Grid), 2-й порядок по пространству.
-    P хранится в [i, j],
-    Vx — в [i+0.5, j] (сдвиг по X), обновляется для i = 0..nx-2,
-    Vz — в [i, j+0.5] (сдвиг по Z), обновляется для j = 0..nz-2.
-    Массивы p, vx, vz имеют форму (nx, nz); вне зоны обновления vx/vz не трогаем.
+    Update fields on a staggered grid, 2nd‑order in space.
+
+    P  is stored at integer nodes [i, j],
+    Vx at [i+0.5, j] (staggered in X), updated for i = 0..nx-2,
+    Vz at [i, j+0.5] (staggered in Z), updated for j = 0..nz-2.
+
+    Arrays p, vx, vz all have shape (nx, nz); values outside the update stencil are left unchanged.
     """
-    # 1. Обновление скоростей (Vx, Vz) по давлению P
-    # Vx: dP/dx = (P[i+1] - P[i]) / dx  (2-й порядок)
+    # 1. Update velocities (Vx, Vz) from pressure P
+    # Vx: dP/dx = (P[i+1] - P[i]) / dx  (2nd order)
     for i in range(nx - 1):
         for j in range(nz):
             rho_x = 0.5 * (rho[i + 1, j] + rho[i, j])
@@ -94,7 +109,7 @@ def update_velocity_stress_staggered(p, vx, vz, vp, rho, dt, dx, dz, nx, nz):
             rho_z = 0.5 * (rho[i, j + 1] + rho[i, j])
             vz[i, j] = vz[i, j] - (dt / rho_z) * (p[i, j + 1] - p[i, j]) / dz
 
-    # 2. Обновление давления P по дивергенции скорости
+    # 2. Update pressure P from velocity divergence
     for i in range(1, nx - 1):
         for j in range(1, nz - 1):
             k_modulus = rho[i, j] * vp[i, j] ** 2
@@ -107,19 +122,22 @@ def update_velocity_stress_staggered(p, vx, vz, vp, rho, dt, dx, dz, nx, nz):
 @jit(nopython=True)
 def update_velocity_stress_staggered_4th(p, vx, vz, vp, rho, dt, dx, dz, nx, nz):
     """
-    То же, но 4-й порядок по пространству в интерьере — меньше численной дисперсии.
-    Стенсил первой производной на полуцелых узлах:
+    Same scheme, but 4th‑order in space in the interior — less numerical dispersion.
+
+    First‑derivative stencil on half‑shifted nodes:
     f'_{i+1/2} = (9(f_{i+1}-f_i) - (f_{i+2}-f_{i-1})) / (8*dx).
-    В приграничной полосе (1 точка с краёв) — 2-й порядок, чтобы вся сетка обновлялась.
+
+    Near the boundary (one cell from each side) we fall back to 2nd order so that
+    the whole grid is updated.
     """
     idx = 1.0 / dx
     idz = 1.0 / dz
-    c_x  =  9.0 /  8.0 * idx      # это остаётся как было — правильно
-    c_x2 = -1.0 / 24.0 * idx      # ← здесь главное изменение: 8 → 24
-    c_z  =  9.0 /  8.0 * idz      # остаётся
+    c_x  =  9.0 /  8.0 * idx      # same as before — correct
+    c_x2 = -1.0 / 24.0 * idx      # main change compared to 2nd order: 8 → 24
+    c_z  =  9.0 /  8.0 * idz      # same
     c_z2 = -1.0 / 24.0 * idz
 
-    # 1. Vx: в интерьере i=1..nx-3 — 4-й порядок; i=0 и i=nx-2 — 2-й порядок
+    # 1. Vx: interior i=1..nx-3 → 4th order; i=0 and i=nx-2 → 2nd order
     for i in range(nx - 1):
         for j in range(nz):
             rho_x = 0.5 * (rho[i + 1, j] + rho[i, j])
@@ -129,7 +147,7 @@ def update_velocity_stress_staggered_4th(p, vx, vz, vp, rho, dt, dx, dz, nx, nz)
                 dp_dx = (p[i + 1, j] - p[i, j]) * idx
             vx[i, j] = vx[i, j] - (dt / rho_x) * dp_dx
 
-    # Vz: в интерьере j=1..nz-3 — 4-й порядок; края — 2-й порядок
+    # Vz: interior j=1..nz-3 → 4th order; boundaries → 2nd order
     for i in range(nx):
         for j in range(nz - 1):
             rho_z = 0.5 * (rho[i, j + 1] + rho[i, j])
@@ -139,7 +157,7 @@ def update_velocity_stress_staggered_4th(p, vx, vz, vp, rho, dt, dx, dz, nx, nz)
                 dp_dz = (p[i, j + 1] - p[i, j]) * idz
             vz[i, j] = vz[i, j] - (dt / rho_z) * dp_dz
 
-    # 2. P: в интерьере (2..nx-3, 2..nz-3) — 4-й порядок; остальное — 2-й порядок
+    # 2. P: interior (2..nx-3, 2..nz-3) → 4th order; elsewhere → 2nd order
     for i in range(1, nx - 1):
         for j in range(1, nz - 1):
             k_modulus = rho[i, j] * vp[i, j] ** 2
@@ -156,7 +174,7 @@ def update_velocity_stress_staggered_4th(p, vx, vz, vp, rho, dt, dx, dz, nx, nz)
 
 
 def absorb(nx, nz, thickness):
-    """Коэффициенты поглощающего слоя (как в simlib)."""
+    """Absorbing boundary coefficients (same shape as in classic simlib)."""
     FW = thickness
     a = 0.0053
     coeff = np.exp(-(a ** 2) * np.arange(FW, dtype=np.float32) ** 2)
@@ -191,39 +209,39 @@ def fd2d_forward_first_order(
     tmax_ms=None,
 ):
     """
-    Прямое моделирование 2D акустики в форме 1-го порядка (скорость–давление),
-    схема Вирьё (staggered grid).
+    Forward 2D acoustic modelling in 1st‑order velocity–pressure form,
+    Virieux‑style staggered‑grid scheme.
 
-    Параметры
-    ---------
-    src : (nt,) array
-        Временная функция источника.
-    vp : (nx, nz) array
-        Скорость P-волны [м/с].
-    nt, dt, dx, dz : int, float
-        Число шагов по времени, шаг по времени и по осям.
-    xsrc, zsrc : float
-        Координаты источника в метрах.
-    rho : (nx, nz) array или float, optional
-        Плотность. Если None, используется 1.0.
-    n_absorb : int
-        Толщина поглощающего слоя в узлах.
-    save_every : int
-        Сохранять снимки полей каждые save_every шагов (1 = каждый шаг).
-    return_vz : bool
-        Возвращать ли историю vz (нужно для P-up/P-down разделения).
-    return_vx : bool
-        Возвращать ли историю vx (нужно для p_diff_from_poynting). При True возвращается (p, vx, vz).
-    order : int, 2 или 4
-        Порядок аппроксимации по пространству. По умолчанию 4 (меньше численной дисперсии).
-    progress_callback : callable, optional
-        Если задан, вызывается как progress_callback(current, total) на каждой итерации по времени
-        (для прогресс-бара в GUI, например PyQt5).
-
-    Возвращает
+    Parameters
     ----------
-    При return_vx=True: (p_cropped, vx_cropped, vz_cropped).
-    Иначе при return_vz=True: (p_cropped, vz_cropped). Иначе: (p_cropped, None).
+    src : (nt,) array
+        Source time function.
+    vp : (nx, nz) array
+        P‑wave velocity [m/s].
+    nt, dt, dx, dz : int, float
+        Number of time steps and sampling intervals in time and space.
+    xsrc, zsrc : float
+        Source coordinates in meters.
+    rho : (nx, nz) array or float, optional
+        Density. If None, 1.0 is used.
+    n_absorb : int
+        Absorbing boundary thickness in grid nodes.
+    save_every : int
+        Save field snapshots every `save_every` steps (1 = every step).
+    return_vz : bool
+        Whether to store vz history (needed for P‑up/P‑down separation).
+    return_vx : bool
+        Whether to store vx history (needed for p_diff_from_poynting). If True returns (p, vx, vz).
+    order : int, 2 or 4
+        Spatial approximation order. Default 4 (less numerical dispersion).
+    progress_callback : callable, optional
+        If provided, called as progress_callback(current, total) on each time step
+        (e.g. to drive a GUI progress bar).
+
+    Returns
+    -------
+    If return_vx is True: (p_cropped, vx_cropped, vz_cropped).
+    Else if return_vz is True: (p_cropped, vz_cropped). Otherwise: (p_cropped, None).
     """
     vp_padded = np.pad(vp, n_absorb, mode="edge")
     nx, nz = vp_padded.shape
@@ -252,7 +270,10 @@ def fd2d_forward_first_order(
 
     nx_crop = vp.shape[0]
     nz_crop = vp.shape[1]
-    n_save = (nt + save_every - 1) // save_every
+    # n_save: 0, save_every, 2*save_every, ... и последний шаг (nt-1), чтобы Tmax был включён
+    n_save = (nt - 1) // save_every + 1
+    if (nt - 1) % save_every != 0:
+        n_save += 1
     write_to_h5 = snapshots_h5_path is not None
     if write_to_h5:
         from . import snapshot_io
@@ -279,7 +300,7 @@ def fd2d_forward_first_order(
     for it in range(nt):
         update_fn(p, vx, vz, vp_padded, rho, dt, dx, dz, nx, nz)
 
-        # Источник в давление (взрыв)
+        # Inject source into pressure (explosive source)
         p[isrc, jsrc] += src[it]
 
         p *= absorb_coeff
@@ -304,6 +325,23 @@ def fd2d_forward_first_order(
 
         if progress_callback is not None:
             progress_callback(it + 1, nt)
+
+    # Сохранить последний шаг (nt-1), если он ещё не сохранён — чтобы Tmax был в снапшотах
+    if (nt - 1) % save_every != 0 and save_idx < n_save:
+        if write_to_h5:
+            writer.write_frame(
+                save_idx,
+                p[i0:i1, j0:j1],
+                vx[i0:i1, j0:j1] if return_vx else None,
+                vz[i0:i1, j0:j1] if return_vz else None,
+            )
+        else:
+            p_history[save_idx] = p[i0:i1, j0:j1]
+            if return_vx:
+                vx_history[save_idx] = vx[i0:i1, j0:j1]
+            if return_vz:
+                vz_history[save_idx] = vz[i0:i1, j0:j1]
+        save_idx += 1
 
     if write_to_h5:
         writer.close()
@@ -342,38 +380,38 @@ def fd2d_backward_first_order(
     seismogram_source=None,
 ):
     """
-    Обратное распространение для RTM: инжекция записей в обратном времени,
-    та же схема 1-го порядка (скорость–давление), что и в fd2d_forward_first_order.
+    Reverse‑time propagation for RTM: inject recorded traces backwards in time,
+    using the same 1st‑order (velocity–pressure) scheme as fd2d_forward_first_order.
 
-    Параметры
-    ---------
-    record : (nt, nrec) array
-        Записи давления на приёмниках (forward time). nrec — число приёмников.
-    vp : (nx, nz) array
-        Скорость P-волны [м/с].
-    nt, dt, dx, dz : int, float
-        Число шагов по времени и шаги сетки.
-    xrec, zrec : (nrec,) array
-        Координаты приёмников в метрах.
-    rho : (nx, nz) array или float, optional
-        Плотность. Если None — 1.0.
-    n_absorb : int
-        Толщина поглощающего слоя.
-    save_every : int
-        Сохранять снимки каждые save_every шагов.
-    return_vz : bool
-        Возвращать ли историю vz.
-    return_vx : bool
-        Возвращать ли историю vx (для p_diff_from_poynting). При True возвращается (p, vx, vz).
-    order : int, 2 или 4
-        Порядок по пространству. По умолчанию 4 (должен совпадать с прямым прогоном для RTM).
-    progress_callback : callable, optional
-        Если задан, вызывается как progress_callback(current, total) на каждой итерации.
-
-    Возвращает
+    Parameters
     ----------
-    При return_vx=True: (p_cropped, vx_cropped, vz_cropped).
-    Иначе при return_vz=True: (p_cropped, vz_cropped). Иначе: (p_cropped, None).
+    record : (nt, nrec) array
+        Recorded pressure at receivers (forward time). nrec is number of receivers.
+    vp : (nx, nz) array
+        P‑wave velocity [m/s].
+    nt, dt, dx, dz : int, float
+        Number of time steps and grid spacings.
+    xrec, zrec : (nrec,) array
+        Receiver coordinates in meters.
+    rho : (nx, nz) array or float, optional
+        Density. If None, 1.0 is used.
+    n_absorb : int
+        Absorbing boundary thickness.
+    save_every : int
+        Save snapshots every `save_every` steps.
+    return_vz : bool
+        Whether to store vz history.
+    return_vx : bool
+        Whether to store vx history (for p_diff_from_poynting). If True returns (p, vx, vz).
+    order : int, 2 or 4
+        Spatial order. Default 4 (should match the forward run for RTM).
+    progress_callback : callable, optional
+        If provided, called as progress_callback(current, total) at each time step.
+
+    Returns
+    -------
+    If return_vx is True: (p_cropped, vx_cropped, vz_cropped).
+    Else if return_vz is True: (p_cropped, vz_cropped). Otherwise: (p_cropped, None).
     """
     vp_padded = np.pad(vp, n_absorb, mode="edge")
     nx, nz = vp_padded.shape
@@ -398,7 +436,10 @@ def fd2d_backward_first_order(
 
     nx_crop = vp.shape[0]
     nz_crop = vp.shape[1]
-    n_save = (nt + save_every - 1) // save_every
+    # n_save: 0, save_every, ... и последний шаг (nt-1), чтобы Tmax был включён
+    n_save = (nt - 1) // save_every + 1
+    if (nt - 1) % save_every != 0:
+        n_save += 1
     write_to_h5 = snapshots_h5_path is not None
     if write_to_h5:
         from . import snapshot_io
@@ -456,6 +497,23 @@ def fd2d_backward_first_order(
         if progress_callback is not None:
             progress_callback(it + 1, nt)
 
+    # Сохранить последний шаг (nt-1), если он ещё не сохранён
+    if (nt - 1) % save_every != 0 and save_idx < n_save:
+        if write_to_h5:
+            writer.write_frame(
+                save_idx,
+                p[i0:i1, j0:j1],
+                vx[i0:i1, j0:j1] if return_vx else None,
+                vz[i0:i1, j0:j1] if return_vz else None,
+            )
+        else:
+            p_history[save_idx] = p[i0:i1, j0:j1]
+            if return_vx:
+                vx_history[save_idx] = vx[i0:i1, j0:j1]
+            if return_vz:
+                vz_history[save_idx] = vz[i0:i1, j0:j1]
+        save_idx += 1
+
     if write_to_h5:
         writer.close()
         return (snapshots_h5_path,)
@@ -473,7 +531,7 @@ def fd2d_backward_first_order(
 
 def p_down_up_from_p_vz(p, vz, vp, rho=1.0):
     """
-    Разделение на нисходящую и восходящую волны по полям P и Vz (импедансный способ):
+    Split total pressure into downgoing and upgoing waves using P and Vz (impedance method):
     p_down = 0.5 * (p + Z * vz),  p_up = 0.5 * (p - Z * vz),  Z = ρ * vp.
     """
     Z = np.asarray(rho, dtype=np.float32) * np.asarray(vp, dtype=np.float32)
@@ -488,56 +546,56 @@ def p_down_up_from_poynting(
     p, vx, vz, axis="z", eps=None, sigma_smooth=2.0, transition_scale=0.1
 ):
     """
-    Разделение на нисходящую и восходящую волны по вектору Пойнтинга S = P·v.
+    Split total pressure into downgoing and upgoing waves using the Poynting vector S = P·v.
 
-    Направление потока энергии задаётся знаком вертикальной компоненты S_z = P·vz:
-    S_z > 0 — энергия вниз (падающая), S_z < 0 — вверх (отражённая).
-    Веса w_down и w_up строятся по сглаженному sign(S), затем p_down = P·w_down,
-    p_up = P·w_up, так что p_down + p_up = P.
+    The energy‑flow direction is given by the sign of the vertical component S_z = P·vz:
+    S_z > 0 → energy downward (incident), S_z < 0 → upward (reflected).
+    Weights w_down and w_up are built from a smoothed sign(S), then
+    p_down = P·w_down, p_up = P·w_up, so that p_down + p_up = P.
 
-    Для уменьшения высокочастотных артефактов: сглаживание S по пространству
-    (sigma_smooth) и мягкий переход tanh(S/scale) вместо резкого sign (transition_scale).
+    To reduce high‑frequency artefacts we smooth S in space (sigma_smooth) and use
+    a soft transition tanh(S/scale) instead of a hard sign (transition_scale).
 
-    Параметры
-    ---------
-    p : (..., nx, nz) array
-        Давление.
-    vx : array той же формы или None
-        Горизонтальная скорость. Для axis='z' можно передать None (не используется).
-    vz : array той же формы
-        Вертикальная скорость частиц.
-    axis : str, 'z' или 'x'
-        Ось для разделения: 'z' — вверх/вниз (S_z = P*vz), 'x' — по горизонтали (S_x = P*vx).
-    eps : float, optional
-        Регуляризация (используется только при transition_scale=0). Если None — авто.
-    sigma_smooth : float или tuple, optional
-        Сглаживание S по пространству перед знаком (в узлах сетки).
-        Для 2D: (sigma_x, sigma_z); для 3D: (0, sigma_x, sigma_z) — по времени не сглаживаем.
-        Один float — то же по x и z (для 3D: (0, sigma, sigma)). По умолчанию 2.0.
-    transition_scale : float, optional
-        Мягкий переход: sign_smooth = tanh(S / scale), scale = transition_scale * percentile(|S|, 90).
-        Больше значение (0.3–0.5) — плавнее переход, меньше высокочастотной грязи. По умолчанию 0.25.
-        Равен 0 — жёсткий sign (S/(|S|+eps)), возможны артефакты.
-
-    Возвращает
+    Parameters
     ----------
-    p_down, p_up : array той же формы, что p
-        Падающая и восходящая (или по axis) компоненты давления.
+    p : (..., nx, nz) array
+        Pressure.
+    vx : array of same shape as p or None
+        Horizontal particle velocity. For axis='z' this can be None (not used).
+    vz : array of same shape as p
+        Vertical particle velocity.
+    axis : {'z', 'x'}
+        Split along 'z' (up/down, S_z = P*vz) or along 'x' (S_x = P*vx).
+    eps : float, optional
+        Regularization used only when transition_scale=0. If None, chosen automatically.
+    sigma_smooth : float or tuple, optional
+        Spatial smoothing of S before taking the sign (in grid cells).
+        For 2D: (sigma_x, sigma_z); for 3D: (0, sigma_x, sigma_z) — no smoothing in time.
+        Single float → same smoothing in x and z (for 3D: (0, sigma, sigma)). Default 2.0.
+    transition_scale : float, optional
+        Soft transition: sign_smooth = tanh(S / scale), scale = transition_scale * percentile(|S|, 90).
+        Larger values (0.3–0.5) → smoother transition and less high‑frequency noise. Default 0.25.
+        Equal to 0 → hard sign (S/(|S|+eps)), which may produce artefacts.
+
+    Returns
+    -------
+    p_down, p_up : array, same shape as p
+        Downgoing and upgoing (or, in general, axis‑oriented) pressure components.
     """
     p = np.asarray(p, dtype=np.float64)
     vz = np.asarray(vz, dtype=np.float64)
 
     if axis == "z":
-        S = p * vz  # вертикальная компонента Пойнтинга (vx не нужен)
+        S = p * vz  # vertical Poynting component (vx not needed here)
     elif axis == "x":
         if vx is None:
-            raise ValueError("для axis='x' нужен vx")
+            raise ValueError("vx is required when axis='x'")
         vx = np.asarray(vx, dtype=np.float64)
         S = p * vx
     else:
-        raise ValueError("axis должен быть 'z' или 'x'")
+        raise ValueError("axis must be 'z' or 'x'")
 
-    # Сглаживание S по пространству (убирает высокочастотную грязь в весах)
+    # Smooth S in space (reduces high‑frequency noise in the weights)
     if sigma_smooth is not None and sigma_smooth > 0:
         sig = np.atleast_1d(sigma_smooth).astype(float)
         if sig.size == 1:
@@ -545,7 +603,7 @@ def p_down_up_from_poynting(
         else:
             sig = tuple(sig.flat)
         if S.ndim == 3:
-            # (nt, nx, nz): сглаживаем только по x, z
+            # (nt, nx, nz): smooth only over x and z
             if len(sig) == 2:
                 sigma_apply = (0, sig[0], sig[1])
             else:
@@ -558,12 +616,12 @@ def p_down_up_from_poynting(
     scale = np.percentile(S_abs, 90) + 1e-30
 
     if transition_scale is None or transition_scale <= 0:
-        # Жёсткий знак (как раньше)
+        # Hard sign (legacy behaviour)
         if eps is None:
             eps = 1e-10 * (np.max(S_abs) + 1e-30)
         sign_smooth = S / (S_abs + eps)
     else:
-        # Мягкий переход tanh(S / scale) — меньше высокочастотных артефактов
+        # Soft transition tanh(S / scale) — fewer high‑frequency artefacts
         scale *= transition_scale
         sign_smooth = np.tanh(S / scale)
 
@@ -582,16 +640,17 @@ def p_diff_from_poynting(
     theta1_deg=60,
 ):
     """
-    Разделение поля на дифракционную (наклонное распространение) и отражённую
-    (вертикальное) составляющие по углу вектора Пойнтинга S = (P·vx, P·vz).
+    Split the field into diffracted (oblique propagation) and reflected (vertical)
+    components by the angle of the Poynting vector S = (P·vx, P·vz).
 
-    theta0_deg..theta1_deg — диапазон углов (от вертикали), в котором вес дифракций
-    плавно растёт от 0 до 1. w_iso ослабляет вертикальный поток (отражения).
+    theta0_deg..theta1_deg specify the angular range (from vertical) where the
+    diffraction weight smoothly increases from 0 to 1. The factor w_iso suppresses
+    purely vertical energy flow (reflections).
 
-    Возвращает
-    ----------
-    p_diff, p_refl : array той же формы, что p
-        Дифракционная и отражённая компоненты давления.
+    Returns
+    -------
+    p_diff, p_refl : array, same shape as p
+        Diffracted and reflected pressure components.
     """
     p = np.asarray(p, dtype=np.float64)
     vx = np.asarray(vx, dtype=np.float64)
@@ -640,26 +699,27 @@ def scattering_angle_weight(
     theta_min_deg=110,
 ):
     """
-    Вес по углу рассеяния между векторами Пойнтинга прямого и обратного полей.
+    Scattering‑angle weight between Poynting vectors of forward and reverse fields.
 
     cos(theta) = -(S_fwd · S_rev) / (|S_fwd| |S_rev|), theta = arccos(...).
-    Большой theta (близко к π) — дифракция, малый theta — отражение.
-    w = clip((theta - theta_min) / (π - theta_min), 0, 1): w→1 для дифракций, w→0 для рефлекторов.
+    Large theta (close to π) → diffraction, small theta → reflection.
+    w = clip((theta - theta_min) / (π - theta_min), 0, 1): w→1 for diffractions, w→0 for reflectors.
 
-    Параметры
-    ---------
-    p_fwd, vx_fwd, vz_fwd : array (nt, nx, nz)
-        Давление и скорости прямого (forward) поля (уже P_down).
-    p_rev, vx_rev, vz_rev : array (nt, nx, nz)
-        Давление и скорости обратного (reverse) поля, выровненного по времени с p_fwd
-        (т.е. p_rev[t] соответствует тому же моменту времени, что и p_fwd[t]).
-    theta_min_deg : float
-        Минимальный угол (градусы); ниже — вес 0 (рефлектор), выше — плавный переход к 1 (дифракция).
-
-    Возвращает
+    Parameters
     ----------
+    p_fwd, vx_fwd, vz_fwd : array (nt, nx, nz)
+        Pressure and velocities of the forward field (already P_down).
+    p_rev, vx_rev, vz_rev : array (nt, nx, nz)
+        Pressure and velocities of the reverse field, time‑aligned with p_fwd
+        (i.e. p_rev[t] corresponds to the same time as p_fwd[t]).
+    theta_min_deg : float
+        Minimum angle (degrees); below it weight is 0 (reflector), above it smoothly
+        increases towards 1 (diffraction).
+
+    Returns
+    -------
     w : (nt, nx, nz) float32
-        Вес дифракции (0 = рефлектор, 1 = дифрактор).
+        Diffraction weight (0 = reflector, 1 = diffractor).
     """
     p_fwd = np.asarray(p_fwd, dtype=np.float64)
     vx_fwd = np.asarray(vx_fwd, dtype=np.float64)

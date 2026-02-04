@@ -1,7 +1,8 @@
 """
-Загрузка скоростной модели из SEG-Y для GUI.
-dz = f.bin[segyio.BinField.Interval] / 1000000
-dx = шаг по X из атрибутов CDP_X (медиана разностей между уникальными X).
+Load a velocity model from SEG-Y for the GUI.
+
+dz = f.bin[segyio.BinField.Interval] / 1e6
+dx = X‑step from CDP_X attributes (median of differences between unique X values).
 """
 import numpy as np
 import segyio
@@ -9,23 +10,32 @@ import segyio
 
 def load_velocity_from_segy(path):
     """
-    Загружает скоростную модель из SEG-Y.
-    path: путь к .sgy файлу.
+    Load a velocity model from a SEG-Y file.
 
-    dz = f.bin[segyio.BinField.Interval] / 1000000
-    dx = медиана разностей между соседними уникальными CDP_X (шаг сетки по X).
+    Parameters
+    ----------
+    path : str
+        Path to the .sgy / .segy file.
 
-    Возвращает (vp, dx, dz) или (None, None, None) при ошибке.
-    vp: (nz, nx), float64; ось 0 — глубина Z, ось 1 — X.
+    Notes
+    -----
+    dz = f.bin[segyio.BinField.Interval] / 1e6
+    dx = median difference between neighbouring unique CDP_X values (grid step along X).
+
+    Returns
+    -------
+    vp, dx, dz
+        vp : (nz, nx) float64; axis 0 — depth Z, axis 1 — X.
+        On error raises RuntimeError.
     """
     try:
         with segyio.open(path, "r", ignore_geometry=True) as f:
-            # dz из бинарного заголовка (интервал сэмпла), в м после деления на 1e6
+            # dz from binary header (sample interval), in meters after division by 1e3
             interval = f.bin[segyio.BinField.Interval]
             dz = float(interval) / 1_000.0
 
-            # dx — шаг по X: медиана разностей между уникальными CDP_X
-            # f.attributes возвращает генератор — приводим к списку
+            # dx — X step: median of differences between unique CDP_X values
+            # f.attributes returns a generator — convert to a list
             cdpx = np.array(list(f.attributes(segyio.TraceField.CDP_X)), dtype=np.float64)
             ux = np.unique(np.sort(cdpx))
             if len(ux) > 1:
@@ -34,8 +44,8 @@ def load_velocity_from_segy(path):
             else:
                 dx = float(np.median(cdpx)) if len(cdpx) > 0 else 1.0
 
-            # Данные: трассы — столбцы по X, сэмплы — по глубине Z
-            # f.trace[:] в segyio — генератор, приводим к списку
+            # Data: traces — columns along X, samples — along depth Z
+            # f.trace[:] in segyio is a generator — convert to a list
             raw = f.trace.raw[:]
             vp = raw.T  # (n_samples, n_traces) = (nz, nx)
         return vp, dx, dz

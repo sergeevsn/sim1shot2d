@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Хранение наборов снапшотов в HDF5: запись кадров во время симуляции и ленивое чтение для просмотра/RTM.
+Snapshot storage in HDF5: write frames during simulation and read them lazily
+for visualization and RTM.
 """
 import numpy as np
 import h5py
 
 
-# Имена датасетов в HDF5 (без суффикса fwd/bwd)
+# Dataset names in HDF5 (without fwd/bwd suffix)
 COMPONENT_DSETS = ("P", "Vz", "Vx")
 
-# Атрибуты в корне файла
+# Attributes stored in the HDF5 file root
 ATTR_N_SAVE = "n_save"
 ATTR_NX = "nx"
 ATTR_NZ = "nz"
@@ -31,26 +32,28 @@ def create_snapshots_h5_writer(
     **extra_attrs
 ):
     """
-    Создаёт HDF5-файл для записи снапшотов и возвращает объект для пошаговой записи кадров.
+    Create an HDF5 file for snapshot storage and return a lightweight writer
+    object for frame‑by‑frame writing.
 
-    Параметры
-    ---------
-    path : str
-        Путь к .h5 файлу.
-    n_save, nx, nz : int
-        Размеры: число кадров и размер сетки (nx, nz) на кадр.
-    run_type : "forward" | "backward"
-        Тип прогона.
-    snapshot_dt_ms, tmax_ms : float, optional
-        Метаданные для воспроизведения.
-    seismogram_source : str, optional
-        Имя сейсмограммы (для backward).
-    **extra_attrs
-        Дополнительные атрибуты в корне файла.
-
-    Возвращает
+    Parameters
     ----------
-    writer : объект с методами write_frame(save_idx, p_slice, vx_slice, vz_slice) и close().
+    path : str
+        Path to the .h5 file.
+    n_save, nx, nz : int
+        Dimensions: number of saved frames and grid size (nx, nz) per frame.
+    run_type : {"forward", "backward"}
+        Run type.
+    snapshot_dt_ms, tmax_ms : float, optional
+        Metadata to reconstruct time axis.
+    seismogram_source : str, optional
+        Name of the seismogram (for backward runs).
+    **extra_attrs
+        Extra attributes to store in the file root.
+
+    Returns
+    -------
+    writer : object
+        Has methods write_frame(save_idx, p_slice, vx_slice, vz_slice) and close().
     """
     f = h5py.File(path, "w")
     for name in COMPONENT_DSETS:
@@ -76,7 +79,7 @@ def create_snapshots_h5_writer(
             self._file = h5file
 
         def write_frame(self, save_idx, p_slice, vx_slice, vz_slice):
-            """Записать один кадр. p_slice, vx_slice, vz_slice — массивы (nx, nz) float32."""
+            """Write one frame. p_slice, vx_slice, vz_slice are (nx, nz) float32 arrays."""
             self._file["P"][save_idx] = np.asarray(p_slice, dtype=np.float32)
             if vx_slice is not None:
                 self._file["Vx"][save_idx] = np.asarray(vx_slice, dtype=np.float32)
@@ -92,8 +95,8 @@ def create_snapshots_h5_writer(
 
 class H5SnapshotComponent:
     """
-    Прокси для одной компоненты снапшотов в HDF5: array-like с .shape и [idx].
-    Поддерживает len() и индексацию по времени для отображения в GUI.
+    Proxy for one snapshot component stored in HDF5: array‑like with .shape and [idx].
+    Supports len() and time indexing, convenient for GUI display.
     """
 
     def __init__(self, path, dset_name):
@@ -120,7 +123,7 @@ class H5SnapshotComponent:
         return int(np.prod(self.shape))
 
     def read_full(self):
-        """Загрузить полный массив (n_save, nx, nz) для percentile/RTM."""
+        """Load the full array (n_save, nx, nz) into memory (for percentile/RTM)."""
         return read_component_full(self._path, self._dset_name)
 
     def __len__(self):
@@ -137,12 +140,14 @@ class H5SnapshotComponent:
 
 def snapshots_dict_from_h5(path, run_type="forward"):
     """
-    Строит dict компонент для GUI: ключи "P fwd", "Vz fwd", "Vx fwd" (или bwd),
-    значения — H5SnapshotComponent с .shape и [idx].
+    Build a dict of components for the GUI: keys are "P fwd", "Vz fwd", "Vx fwd"
+    (or bwd), values are H5SnapshotComponent objects with .shape and [idx].
 
+    Parameters
+    ----------
     path : str
-        Путь к .h5 файлу.
-    run_type : "forward" | "backward"
+        Path to the .h5 file.
+    run_type : {"forward", "backward"}
     """
     suffix = " fwd" if run_type == "forward" else " bwd"
     return {
@@ -153,8 +158,8 @@ def snapshots_dict_from_h5(path, run_type="forward"):
 
 def read_component_full(path, dset_name):
     """
-    Загрузить полный массив одной компоненты из HDF5 (n_save, nx, nz).
-    Используется для сейсмограммы из P и для RTM Build.
+    Load full (n_save, nx, nz) array for a single component from HDF5.
+    Used for building seismograms from P and for RTM image construction.
     """
     with h5py.File(path, "r") as f:
         return np.asarray(f[dset_name][...], dtype=np.float64)
@@ -162,22 +167,25 @@ def read_component_full(path, dset_name):
 
 def compute_seismogram_from_h5(path, receivers, dx, dz, snapshot_dt_ms=None, progress_callback=None, component="P"):
     """
-    Строит сейсмограмму по выбранной компоненте в HDF5, читая по одному кадру —
-    без загрузки всего массива в память.
+    Build a seismogram for a given component stored in HDF5 by reading one
+    frame at a time without loading the whole 3D array into memory.
 
-    path : str
-        Путь к .h5 файлу снапшотов forward.
-    receivers : list of (x, z)
-        Координаты приёмников в метрах.
-    dx, dz : float
-        Шаги сетки.
-    snapshot_dt_ms : float, optional
-        Шаг по времени в мс; если None — берётся из атрибутов файла.
-    progress_callback : callable, optional
-        progress_callback(current, total) вызывается при обновлении (0, n_save) в начале и (t+1, n_save) в цикле.
-
-    Возвращает
+    Parameters
     ----------
+    path : str
+        Path to the forward snapshot .h5 file.
+    receivers : list of (x, z)
+        Receiver coordinates in meters.
+    dx, dz : float
+        Grid spacing.
+    snapshot_dt_ms : float, optional
+        Time sampling in ms; if None, taken from file attributes.
+    progress_callback : callable, optional
+        Called as progress_callback(current, total): first with (0, n_save) and
+        later with (t+1, n_save) inside the loop.
+
+    Returns
+    -------
     data : (n_save, n_receivers) float64
     t_ms : (n_save,) float64
     """
@@ -194,7 +202,7 @@ def compute_seismogram_from_h5(path, receivers, dx, dz, snapshot_dt_ms=None, pro
         dt_ms = float(snapshot_dt_ms) if snapshot_dt_ms is not None else float(f.attrs.get(ATTR_SNAPSHOT_DT_MS, 0))
         if dt_ms <= 0:
             dt_ms = 2.0
-        # Индексы узлов сетки для каждого приёмника
+        # Grid node indices for each receiver
         rec_ij = []
         for x, z in receivers:
             ix = int(round(x / dx))
@@ -204,7 +212,7 @@ def compute_seismogram_from_h5(path, receivers, dx, dz, snapshot_dt_ms=None, pro
             rec_ij.append((ix, jz))
         data = np.zeros((n_save, len(receivers)), dtype=np.float64)
         for t in range(n_save):
-            frame = dset[t]  # один кадр (nx, nz) в памяти
+            frame = dset[t]  # a single frame (nx, nz) in memory
             for rec_idx, (ix, jz) in enumerate(rec_ij):
                 data[t, rec_idx] = float(frame[ix, jz])
             if progress_callback is not None:
@@ -215,14 +223,17 @@ def compute_seismogram_from_h5(path, receivers, dx, dz, snapshot_dt_ms=None, pro
 
 def build_rtm_image(fwd_source, bwd_source, progress_callback=None):
     """
-    Собирает RTM-образ по времени: image += fwd[t] * bwd_reversed[t], с опциональным progress.
+    Build RTM image by correlating forward and backward fields in time:
+    image += fwd[t] * bwd_reversed[t], with optional progress reporting.
 
-    fwd_source, bwd_source : np.ndarray (n_save, nx, nz) или (path, dset_name) для HDF5.
-    progress_callback : callable(current, total), optional.
-
-    Возвращает
+    Parameters
     ----------
-    image : (nx, nz) float64 — для отображения нужно .T → (nz, nx).
+    fwd_source, bwd_source : np.ndarray (n_save, nx, nz) or (path, dset_name) tuples for HDF5.
+    progress_callback : callable(current, total), optional
+
+    Returns
+    -------
+    image : (nx, nz) float64  (for display you usually use image.T → (nz, nx)).
     """
     if isinstance(fwd_source, np.ndarray):
         n_save, nx, nz = fwd_source.shape
@@ -261,8 +272,8 @@ def build_rtm_image(fwd_source, bwd_source, progress_callback=None):
 
 def sample_frames_for_percentile(path, dset_name, max_frames=50):
     """
-    Читает до max_frames кадров из HDF5 (равномерно по времени) для оценки vmin/vmax
-    без загрузки всего массива — избегает OOM при больших снапшотах.
+    Read up to `max_frames` frames from HDF5 (evenly spaced in time) to estimate
+    vmin/vmax without loading the full array — avoids OOM for huge snapshot sets.
     """
     with h5py.File(path, "r") as f:
         dset = f[dset_name]
@@ -276,7 +287,7 @@ def sample_frames_for_percentile(path, dset_name, max_frames=50):
 
 
 def read_snapshots_metadata(path):
-    """Прочитать только метаданные из корня HDF5 (n_save, nx, nz, run_type, ...)."""
+    """Read only metadata from the HDF5 root (n_save, nx, nz, run_type, ...)."""
     with h5py.File(path, "r") as f:
         a = f.attrs
         return {

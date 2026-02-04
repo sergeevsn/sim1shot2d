@@ -9,13 +9,14 @@ import numpy as np
 from configparser import ConfigParser
 from scipy import ndimage
 from scipy.interpolate import RegularGridInterpolator
+from scipy.signal import resample as scipy_resample
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel, QFileDialog,
     QMenu, QAction, QDialog, QFormLayout, QDoubleSpinBox, QSpinBox, QPushButton,
     QDialogButtonBox, QListWidget, QListWidgetItem, QGroupBox, QRadioButton,
     QHBoxLayout, QMessageBox, QScrollArea, QFrame, QSizePolicy, QComboBox,
     QCheckBox, QSlider, QGridLayout, QProgressBar, QLineEdit, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView,
+    QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer
 
@@ -31,6 +32,7 @@ _gui_dir = os.path.dirname(os.path.abspath(__file__))
 _root_dir = os.path.dirname(_gui_dir)
 if _root_dir not in sys.path:
     sys.path.insert(0, _root_dir)
+import segyio
 from gui.source.model_io import load_velocity_from_segy
 from gui.source import snapshot_io
 from gui.source.simlib_first_order import (
@@ -59,13 +61,21 @@ def _get_process_memory_mb():
         return None
 
 
-def _get_snapshots_h5_path(base_dir, run_name, run_type="forward"):
-    """Путь к HDF5 снапшотов: base_dir/snapshots/<fwd|bwd>_<sanitized_name>.h5"""
+def _get_snapshots_h5_path(base_dir, run_name, run_type="forward", project_stem=None):
+    """Путь к HDF5 снапшотов: base_dir/<project_stem>_files/<fwd|bwd>_<sanitized_name>.h5"""
     safe = re.sub(r"[^\w\-]", "_", (run_name or "run").strip()) or "run"
     prefix = "fwd" if run_type == "forward" else "bwd"
-    snap_dir = os.path.join(base_dir, "snapshots")
+    stem = (project_stem or "unsaved").strip() or "unsaved"
+    snap_dir = os.path.join(base_dir, "{}_files".format(stem))
     os.makedirs(snap_dir, exist_ok=True)
     return os.path.join(snap_dir, "{}_{}.h5".format(prefix, safe))
+
+
+def _get_seismogram_npz_path(snapshots_h5_path):
+    """Путь к NPZ сейсмограмм: рядом с H5, имя <base>.h5 -> <base>_seismogram.npz"""
+    d = os.path.dirname(snapshots_h5_path)
+    base = os.path.splitext(os.path.basename(snapshots_h5_path))[0]
+    return os.path.join(d, "{}_seismogram.npz".format(base))
 
 
 def _get_system_memory_limit_mb(percent=0.85):
@@ -1614,6 +1624,67 @@ class BackwardSimulationWorker(QObject):
             self.error.emit(str(e))
 
 
+class ExportSeismogramSegyDialog(QDialog):
+    """Параметры экспорта текущей сейсмограммы в SEG-Y."""
+    # Байты заголовков (SEG-Y trace header)
+    SX_BYTE = 73
+    SZ_BYTE = 45
+    RX_BYTE = 81
+    RZ_BYTE = 41
+    SCALER_BYTE_1 = 71
+    SCALER_BYTE_2 = 69
+
+    def __init__(self, max_time_ms=1000.0, dt_ms=2.0, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export Seismogram to SEG-Y")
+        layout = QFormLayout(self)
+        self._format_combo = QComboBox()
+        self._format_combo.addItems(["IEEE", "IBM"])
+        layout.addRow("Format:", self._format_combo)
+        self._max_time_spin = QDoubleSpinBox()
+        self._max_time_spin.setRange(0.1, 1e6)
+        self._max_time_spin.setDecimals(2)
+        self._max_time_spin.setValue(max_time_ms)
+        self._max_time_spin.setSuffix(" ms")
+        layout.addRow("Max Time, ms:", self._max_time_spin)
+        self._dt_spin = QDoubleSpinBox()
+        self._dt_spin.setRange(0.01, 1000.0)
+        self._dt_spin.setDecimals(4)
+        self._dt_spin.setValue(dt_ms)
+        self._dt_spin.setSuffix(" ms")
+        layout.addRow("DT, ms:", self._dt_spin)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addRow(bb)
+
+    def get_format_ieee(self):
+        return self._format_combo.currentText() == "IEEE"
+
+    def get_max_time_ms(self):
+        return self._max_time_spin.value()
+
+    def get_dt_ms(self):
+        return self._dt_spin.value()
+
+
+class AboutDialog(QDialog):
+    """Диалог About: показывает содержимое README.md в виде текста."""
+
+    def __init__(self, parent=None, text=""):
+        super().__init__(parent)
+        self.setWindowTitle("About Sim1Shot2D")
+        layout = QVBoxLayout(self)
+        self._text_edit = QTextEdit(self)
+        self._text_edit.setReadOnly(True)
+        self._text_edit.setPlainText(text or "No README.md content available.")
+        layout.addWidget(self._text_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok, parent=self)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+        self.resize(640, 480)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1844,6 +1915,26 @@ class MainWindow(QMainWindow):
         act_snapshot_gif = QAction("Snapshot Animation", self)
         act_snapshot_gif.triggered.connect(self._export_snapshot_animation)
         export_menu.addAction(act_snapshot_gif)
+        act_seismogram_segy = QAction("Seismogram SEG-Y", self)
+        act_seismogram_segy.triggered.connect(self._export_seismogram_segy)
+        export_menu.addAction(act_seismogram_segy)
+
+        help_menu = menubar.addMenu("&Help")
+        act_about = QAction("About", self)
+        act_about.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(act_about)
+
+    def _show_about_dialog(self):
+        """Открыть диалог About и показать содержимое README.md."""
+        readme_path = os.path.join(_gui_dir, "README.md")
+        text = ""
+        try:
+            with open(readme_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception as e:
+            text = "README.md not found.\nExpected path: {}\n\nError: {}".format(readme_path, e)
+        dlg = AboutDialog(self, text=text)
+        dlg.exec_()
 
     def _build_layer_panel(self):
         panel = QFrame()
@@ -2466,6 +2557,89 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
+    def _export_seismogram_segy(self):
+        """Export → Seismogram SEG-Y: текущая сейсмограмма в SEG-Y с диалогом параметров."""
+        if self._seismogram_data is None or self._seismogram_data.size == 0:
+            QMessageBox.warning(self, "Export", "No seismogram data. Run Forward and select current seismogram.")
+            return
+        if not self._receivers:
+            QMessageBox.warning(self, "Export", "No receivers defined.")
+            return
+        t_ms = self._seismogram_t_ms
+        if t_ms is None or (hasattr(t_ms, "__len__") and len(t_ms) == 0):
+            QMessageBox.warning(self, "Export", "No time axis for seismogram.")
+            return
+        # По умолчанию Max Time = Tmax из настроек симуляции (чтобы не терять последний сэмпл)
+        tmax_sim = self._sim_settings.get("tmax_ms", 1000.0)
+        max_from_data = float(np.max(t_ms)) if hasattr(t_ms, "__len__") else float(t_ms)
+        max_time_default = max(tmax_sim, max_from_data)
+        dt_default = self._sim_settings.get("snapshot_dt_ms", 2.0)
+        dlg = ExportSeismogramSegyDialog(max_time_ms=max_time_default, dt_ms=dt_default, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save Seismogram SEG-Y", "", "SEG-Y (*.sgy *.segy);;All (*)")
+        if not path:
+            return
+        if not path.lower().endswith((".sgy", ".segy")):
+            path = path + ".sgy"
+        use_ieee = dlg.get_format_ieee()
+        max_time_ms = dlg.get_max_time_ms()
+        export_dt_ms = dlg.get_dt_ms()
+        scaler = 100
+        sx_byte = ExportSeismogramSegyDialog.SX_BYTE
+        sz_byte = ExportSeismogramSegyDialog.SZ_BYTE
+        rx_byte = ExportSeismogramSegyDialog.RX_BYTE
+        rz_byte = ExportSeismogramSegyDialog.RZ_BYTE
+        scaler_b1 = ExportSeismogramSegyDialog.SCALER_BYTE_1
+        scaler_b2 = ExportSeismogramSegyDialog.SCALER_BYTE_2
+
+        data = np.asarray(self._seismogram_data, dtype=np.float64)
+        n_traces = data.shape[1] if data.ndim >= 2 else 1
+        if data.ndim == 1:
+            data = data[:, np.newaxis]
+        n_orig = data.shape[0]
+        orig_dt = (float(np.max(t_ms)) - float(np.min(t_ms))) / (n_orig - 1) if n_orig > 1 else dt_default
+
+        n_samples = int(round(max_time_ms / export_dt_ms)) + 1
+        if abs(export_dt_ms - orig_dt) < 1e-9 * max(export_dt_ms, orig_dt):
+            export_data = np.zeros((n_samples, n_traces), dtype=np.float64)
+            copy_n = min(n_samples, n_orig)
+            export_data[:copy_n, :] = data[:copy_n, :]
+            if copy_n < n_samples:
+                export_data[copy_n:, :] = 0
+            time_axis_ms = np.arange(n_samples, dtype=np.float64) * export_dt_ms
+        else:
+            time_axis_ms = np.arange(n_samples, dtype=np.float64) * export_dt_ms
+            export_data = np.zeros((n_samples, n_traces), dtype=np.float64)
+            for tr in range(n_traces):
+                export_data[:, tr] = scipy_resample(data[:, tr], n_samples)
+
+        spec = segyio.spec()
+        spec.format = 5 if use_ieee else 1
+        spec.sorting = 0
+        spec.samples = np.arange(len(time_axis_ms), dtype=np.int32)
+        spec.tracecount = n_traces
+
+        try:
+            with segyio.create(path, spec) as f:
+                f.bin[segyio.BinField.Interval] = int(round(export_dt_ms * 1000))
+                sx = self._source[0] if self._source else 0.0
+                sz = self._source[1] if self._source else 0.0
+                for i in range(n_traces):
+                    f.trace[i] = np.asarray(export_data[:, i], dtype=np.float32)
+                    h = f.header[i]
+                    h[scaler_b1] = scaler
+                    h[scaler_b2] = scaler
+                    h[sx_byte] = int(round(sx * scaler))
+                    h[sz_byte] = int(round(sz * scaler))
+                    rx = self._receivers[i][0]
+                    rz = self._receivers[i][1]
+                    h[rx_byte] = int(round(rx * scaler))
+                    h[rz_byte] = int(round(rz * scaler))
+            QMessageBox.information(self, "Export", "Seismogram saved: {} ({} traces, {} samples).".format(path, n_traces, n_samples))
+        except Exception as e:
+            QMessageBox.warning(self, "Export", "Export failed:\n\n{}".format(e))
+
     def _save_project_to_ini(self, path):
         cfg = ConfigParser()
         cfg.add_section("model")
@@ -2568,6 +2742,19 @@ class MainWindow(QMainWindow):
                     except ValueError:
                         rel = os.path.basename(rel)
                 cfg.set("runs", "forward_{}_path".format(i), rel)
+                # Сохраняем сейсмограммы в NPZ для быстрой загрузки при открытии проекта
+                if r.get("seismograms") and r.get("seismogram_t_ms") is not None:
+                    npz_path = _get_seismogram_npz_path(r["snapshots_path"])
+                    try:
+                        np.savez_compressed(
+                            npz_path,
+                            P=r["seismograms"]["P"],
+                            Vz=r["seismograms"]["Vz"],
+                            Vx=r["seismograms"]["Vx"],
+                            t_ms=r["seismogram_t_ms"],
+                        )
+                    except Exception:
+                        pass
             cfg.set("runs", "backward_count", str(len(bwd_with_h5)))
             for i, r in enumerate(bwd_with_h5):
                 cfg.set("runs", "backward_{}_name".format(i), r["name"])
@@ -2588,11 +2775,13 @@ class MainWindow(QMainWindow):
         if self._rtm_image is not None and self._rtm_image.size > 0:
             if not cfg.has_section("runs"):
                 cfg.add_section("runs")
-            snap_dir = os.path.join(base_dir, "snapshots")
+            project_stem = os.path.splitext(os.path.basename(path))[0].strip() or "unsaved"
+            snap_dir_name = "{}_files".format(project_stem)
+            snap_dir = os.path.join(base_dir, snap_dir_name)
             os.makedirs(snap_dir, exist_ok=True)
-            rtm_path = os.path.join(snap_dir, "rtm_image.npy")
-            np.save(rtm_path, self._rtm_image.astype(np.float64))
-            cfg.set("runs", "rtm_file", "snapshots/rtm_image.npy")
+            rtm_path = os.path.join(snap_dir, "rtm_image.npz")
+            np.savez_compressed(rtm_path, image=self._rtm_image.astype(np.float64))
+            cfg.set("runs", "rtm_file", os.path.join(snap_dir_name, "rtm_image.npz"))
 
         with open(path, "w", encoding="utf-8") as f:
             cfg.write(f)
@@ -2768,15 +2957,26 @@ class MainWindow(QMainWindow):
                     continue
                 seismograms = {}
                 seismogram_t_ms = None
-                for comp in ("P", "Vz", "Vx"):
-                    data_c, t_c = snapshot_io.compute_seismogram_from_h5(
-                        full_path, self._receivers, self._dx, self._dz,
-                        snapshot_dt_ms=self._sim_settings.get("snapshot_dt_ms", 2.0),
-                        component=comp,
-                    )
-                    seismograms[comp] = data_c
-                    if seismogram_t_ms is None:
-                        seismogram_t_ms = t_c
+                npz_path = _get_seismogram_npz_path(full_path)
+                if os.path.isfile(npz_path):
+                    try:
+                        z = np.load(npz_path, allow_pickle=False)
+                        seismograms["P"] = z["P"]
+                        seismograms["Vz"] = z["Vz"]
+                        seismograms["Vx"] = z["Vx"]
+                        seismogram_t_ms = z["t_ms"]
+                    except Exception:
+                        pass
+                if not seismograms or seismogram_t_ms is None:
+                    for comp in ("P", "Vz", "Vx"):
+                        data_c, t_c = snapshot_io.compute_seismogram_from_h5(
+                            full_path, self._receivers, self._dx, self._dz,
+                            snapshot_dt_ms=self._sim_settings.get("snapshot_dt_ms", 2.0),
+                            component=comp,
+                        )
+                        seismograms[comp] = data_c
+                        if seismogram_t_ms is None:
+                            seismogram_t_ms = t_c
                 snapshots = snapshot_io.snapshots_dict_from_h5(full_path, "forward")
                 self._forward_runs.append({
                     "name": name,
@@ -2810,8 +3010,13 @@ class MainWindow(QMainWindow):
                 rtm_full = os.path.normpath(os.path.join(base_dir, rtm_rel))
                 if os.path.isfile(rtm_full):
                     try:
-                        img = np.load(rtm_full)
-                        self._rtm_image = np.asarray(img, dtype=np.float64)
+                        data = np.load(rtm_full, allow_pickle=False)
+                        if hasattr(data, "files") and "image" in data.files:
+                            img = np.asarray(data["image"], dtype=np.float64)
+                            data.close()
+                        else:
+                            img = np.asarray(data, dtype=np.float64)
+                        self._rtm_image = img
                         self._rtm_image_base = self._rtm_image.copy()
                     except Exception:
                         pass
@@ -3147,13 +3352,53 @@ class MainWindow(QMainWindow):
             model_xmax = (nx_m - 1) * float(self._dx)
             model_zmax = (nz_m - 1) * float(self._dz)
             model_dz = float(self._dz)
-        x, z, freq = 0, 0, 22
-        if self._source is not None:
-            x, z, freq = self._source[0], self._source[1], self._source[2]
+        # Defaults: X = 0, Z = model dz (surface) if available, otherwise 0
+        x, z, freq = 0.0, (model_dz if model_dz is not None else 0.0), 22.0
+        # If source is already defined, reuse its last position and frequency
+        old_source = self._source
+        if old_source is not None:
+            x, z, freq = old_source[0], old_source[1], old_source[2]
         dlg = SourceDialog(x, z, freq, self, model_xmax=model_xmax, model_zmax=model_zmax, model_dz=model_dz)
         if dlg.exec_() == QDialog.Accepted:
-            self._source = dlg.get_params()
+            new_source = dlg.get_params()
+            # If source position changes and there are simulation results, warn and optionally clear them.
+            if old_source is not None and (
+                abs(new_source[0] - old_source[0]) > 1e-9
+                or abs(new_source[1] - old_source[1]) > 1e-9
+                or abs(new_source[2] - old_source[2]) > 1e-9
+            ):
+                has_runs = len(self._forward_runs) > 0 or len(self._backward_runs) > 0
+                has_rtm = self._rtm_image is not None and getattr(self._rtm_image, "size", 0) > 0
+                if has_runs or has_rtm:
+                    reply = QMessageBox.warning(
+                        self,
+                        "Survey — Source",
+                        "Changing the source position will remove all Forward/Backward runs,\n"
+                        "seismograms and RTM image. Continue?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if reply != QMessageBox.Yes:
+                        return
+                    # Clear runs, seismograms and RTM (same reset logic as in Crop)
+                    self._forward_runs = []
+                    self._backward_runs = []
+                    self._current_fwd_name = None
+                    self._current_bwd_name = None
+                    self._current_seismogram_name = None
+                    self._snapshots = None
+                    self._seismogram_data = None
+                    self._seismogram_t_ms = None
+                    self._rtm_image = None
+                    self._rtm_image_base = None
+            self._source = new_source
             self._apply_velocity_to_canvas()
+            # Refresh combos/seismograms/snapshots state if we have just cleared runs
+            self._refresh_current_combos()
+            self._apply_current_seismogram()
+            self._rebuild_effective_snapshots()
+            self._update_layer_availability()
+            self._update_memory_status()
 
     def _survey_receivers(self):
         # Ограничения приёмников: не выходить за пределы текущей модели
@@ -3280,7 +3525,8 @@ class MainWindow(QMainWindow):
         self._progress_bar.setFormat("%v / %m")
 
         base_dir = os.path.dirname(os.path.abspath(self._project_path)) if self._project_path else _root_dir
-        snap_h5_path = _get_snapshots_h5_path(base_dir, self._pending_forward_name, "forward")
+        project_stem = os.path.splitext(os.path.basename(self._project_path))[0] if self._project_path else "unsaved"
+        snap_h5_path = _get_snapshots_h5_path(base_dir, self._pending_forward_name, "forward", project_stem=project_stem)
 
         self._forward_thread = QThread()
         self._forward_worker = ForwardSimulationWorker(
@@ -3355,6 +3601,17 @@ class MainWindow(QMainWindow):
                     if seismogram_t_ms is None:
                         seismogram_t_ms = t_c
                 print("[Forward] seismogram from H5 done", flush=True)
+                npz_path = _get_seismogram_npz_path(h5_path)
+                try:
+                    np.savez_compressed(
+                        npz_path,
+                        P=seismograms["P"],
+                        Vz=seismograms["Vz"],
+                        Vx=seismograms["Vx"],
+                        t_ms=seismogram_t_ms,
+                    )
+                except Exception:
+                    pass
                 snapshots = snapshot_io.snapshots_dict_from_h5(h5_path, "forward")
                 print("[Forward] snapshots_dict_from_h5 done", flush=True)
                 self._forward_runs = [r for r in self._forward_runs if r["name"] != name]
@@ -3548,7 +3805,8 @@ class MainWindow(QMainWindow):
         self._progress_bar.setFormat("%v / %m")
 
         base_dir = os.path.dirname(os.path.abspath(self._project_path)) if self._project_path else _root_dir
-        snap_h5_path = _get_snapshots_h5_path(base_dir, self._pending_backward_name, "backward")
+        project_stem = os.path.splitext(os.path.basename(self._project_path))[0] if self._project_path else "unsaved"
+        snap_h5_path = _get_snapshots_h5_path(base_dir, self._pending_backward_name, "backward", project_stem=project_stem)
 
         self._backward_thread = QThread()
         self._backward_worker = BackwardSimulationWorker(

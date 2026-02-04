@@ -1,1 +1,1 @@
-# gui/source — библиотеки с логикой расчётов
+# gui/source — computation and simulation helper libraries

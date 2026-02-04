@@ -1,0 +1,10 @@
+# Sim1Shot2D GUI — только зависимости, используемые проектом
+numpy
+scipy
+PyQt5
+matplotlib
+numba
+h5py
+segyio
+psutil
+Pillow
