@@ -160,9 +160,10 @@ def read_component_full(path, dset_name):
         return np.asarray(f[dset_name][...], dtype=np.float64)
 
 
-def compute_seismogram_from_h5(path, receivers, dx, dz, snapshot_dt_ms=None, progress_callback=None):
+def compute_seismogram_from_h5(path, receivers, dx, dz, snapshot_dt_ms=None, progress_callback=None, component="P"):
     """
-    Строит сейсмограмму по полю P в HDF5, читая по одному кадру — без загрузки всего массива в память.
+    Строит сейсмограмму по выбранной компоненте в HDF5, читая по одному кадру —
+    без загрузки всего массива в память.
 
     path : str
         Путь к .h5 файлу снапшотов forward.
@@ -183,7 +184,10 @@ def compute_seismogram_from_h5(path, receivers, dx, dz, snapshot_dt_ms=None, pro
     if not receivers:
         return None, None
     with h5py.File(path, "r") as f:
-        dset = f["P"]
+        comp = str(component or "P")
+        if comp not in f:
+            comp = "P"
+        dset = f[comp]
         n_save, nx, nz = dset.shape
         if progress_callback is not None:
             progress_callback(0, n_save)

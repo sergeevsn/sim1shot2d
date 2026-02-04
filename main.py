@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox, QListWidget, QListWidgetItem, QGroupBox, QRadioButton,
     QHBoxLayout, QMessageBox, QScrollArea, QFrame, QSizePolicy, QComboBox,
     QCheckBox, QSlider, QGridLayout, QProgressBar, QLineEdit, QStackedWidget,
+    QTableWidget, QTableWidgetItem, QHeaderView,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer
 
@@ -22,6 +23,7 @@ import matplotlib
 matplotlib.use("Qt5Agg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 # Импорт из gui/source: добавляем корень проекта в path
 import re
@@ -130,6 +132,7 @@ class VelocityCanvas(FigureCanvas):
             self.setParent(parent)
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._fig.subplots_adjust(left=0.14, right=0.92, top=0.95, bottom=0.1)
         self._ax = self._fig.add_subplot(111)
         self._cbar = None
         self._vp = None
@@ -299,6 +302,7 @@ class SeismogramCanvas(FigureCanvas):
         self.setMinimumSize(300, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._ax = self._fig.add_subplot(111)
+        self._fig.subplots_adjust(left=0.14, right=0.95, top=0.95, bottom=0.1)
         self._layout = "Profile"
         self._data = None       # (n_times, n_receivers) для отображения
         self._t_ms = None       # 1D, мс
@@ -326,6 +330,7 @@ class SeismogramCanvas(FigureCanvas):
 
     def _redraw(self):
         self._ax.clear()
+        self._fig.subplots_adjust(left=0.14, right=0.95, top=0.95, bottom=0.1)
         if self._layout == "Profile":
             self._ax.set_xlabel("X, m")
             self._ax.set_ylabel("Time, ms")
@@ -378,10 +383,180 @@ class SeismogramCanvas(FigureCanvas):
         self.draw()
 
 
+def _render_snapshot_frame_agg(vp, dx, dz, receivers, source, smoothed_vp, snapshot_2d,
+                                include_overlays, alpha_original, alpha_survey, alpha_smoothed, alpha_snapshots,
+                                snapshot_vmin, snapshot_vmax, time_ms=0.0, component_label="P",
+                                figsize=(6, 4), dpi=100):
+    """
+    Рисует один кадр Z-X (модель + опциональные оверлеи + снапшот), без RTM.
+    Возвращает RGB array (H, W, 3) uint8 для записи в GIF.
+    """
+    fig = Figure(figsize=figsize, dpi=dpi, facecolor="#f0f0f0")
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
+    fig.subplots_adjust(left=0.14, right=0.95, top=0.92, bottom=0.1)
+    nz, nx = vp.shape
+    extent = [0, nx * dx, nz * dz, 0]
+    im = None
+    if include_overlays:
+        im = ax.imshow(vp, cmap="seismic", aspect="auto", extent=extent, interpolation="nearest",
+                       origin="upper", alpha=alpha_original)
+        if smoothed_vp is not None and smoothed_vp.shape == vp.shape:
+            ax.imshow(smoothed_vp, cmap="seismic", aspect="auto", extent=extent,
+                      interpolation="nearest", origin="upper", alpha=alpha_smoothed)
+    if snapshot_2d is not None and snapshot_2d.shape == vp.shape:
+        s = np.asarray(snapshot_2d, dtype=np.float64)
+        vmin = snapshot_vmin
+        vmax = snapshot_vmax
+        if vmin is None or vmax is None:
+            v = max(np.abs(s.min()), np.abs(s.max())) or 1.0
+            vmin, vmax = -v, v
+        ax.imshow(s, cmap="gray", aspect="auto", extent=extent, interpolation="nearest",
+                  origin="upper", alpha=alpha_snapshots, vmin=vmin, vmax=vmax)
+    if im is None:
+        im = ax.imshow(vp, cmap="seismic", aspect="auto", extent=extent,
+                       interpolation="nearest", origin="upper", alpha=0.0)
+    ax.set_title("t = {} ms, {}".format(int(round(time_ms)), component_label), fontsize=10)
+    ax.set_xlabel("X, m")
+    ax.set_ylabel("Z, m")
+    ax.tick_params(axis="both", which="major", labelsize=8)
+    if include_overlays and alpha_survey > 0:
+        for (rx, rz) in (receivers or []):
+            ax.text(rx, rz, "x", color="lime", fontsize=10, ha="center", va="center", fontweight="bold", alpha=alpha_survey)
+        if source is not None:
+            sx, sz = source[0], source[1]
+            ax.text(sx, sz, "v", color="red", fontsize=10, ha="center", va="center", fontweight="bold", alpha=alpha_survey)
+    ax.autoscale(False)
+    ax.set_xlim(0, nx * dx)
+    ax.set_ylim(nz * dz, 0)
+    canvas.draw()
+    w, h = canvas.get_width_height()
+    # matplotlib 3.6+ убрал tostring_rgb(); используем buffer_rgba() и берём RGB
+    buf = np.asarray(canvas.buffer_rgba()).reshape((h, w, 4))
+    rgb = buf[:, :, :3].copy()
+    return rgb
+
+
+class _SnapshotGifRendererCtx(object):
+    """
+    Контекст для быстрого экспорта GIF: один раз создаётся figure/canvas,
+    дальше обновляются только данные снапшота и заголовок — без пересоздания фигуры.
+    """
+    def __init__(self, vp, dx, dz, receivers, source, smoothed_vp,
+                 include_overlays, alpha_original, alpha_survey, alpha_smoothed, alpha_snapshots,
+                 snapshot_vmin, snapshot_vmax, figsize=(6, 4), dpi=100):
+        nz, nx = vp.shape
+        extent = [0, nx * dx, nz * dz, 0]
+        self.fig = Figure(figsize=figsize, dpi=dpi, facecolor="#f0f0f0")
+        self.canvas = FigureCanvasAgg(self.fig)
+        ax = self.fig.add_subplot(111)
+        self.fig.subplots_adjust(left=0.14, right=0.95, top=0.92, bottom=0.1)
+        if include_overlays:
+            ax.imshow(vp, cmap="seismic", aspect="auto", extent=extent, interpolation="nearest",
+                     origin="upper", alpha=alpha_original)
+            if smoothed_vp is not None and smoothed_vp.shape == vp.shape:
+                ax.imshow(smoothed_vp, cmap="seismic", aspect="auto", extent=extent,
+                          interpolation="nearest", origin="upper", alpha=alpha_smoothed)
+        # Слой снапшота — единственный, который будем обновлять
+        dummy = np.zeros_like(vp, dtype=np.float64)
+        self.snapshot_im = ax.imshow(
+            dummy, cmap="gray", aspect="auto", extent=extent, interpolation="nearest",
+            origin="upper", alpha=alpha_snapshots, vmin=snapshot_vmin, vmax=snapshot_vmax
+        )
+        if not include_overlays:
+            ax.imshow(vp, cmap="seismic", aspect="auto", extent=extent,
+                      interpolation="nearest", origin="upper", alpha=0.0)
+        ax.set_xlabel("X, m")
+        ax.set_ylabel("Z, m")
+        ax.tick_params(axis="both", which="major", labelsize=8)
+        if include_overlays and alpha_survey > 0:
+            for (rx, rz) in (receivers or []):
+                ax.text(rx, rz, "x", color="lime", fontsize=10, ha="center", va="center", fontweight="bold", alpha=alpha_survey)
+            if source is not None:
+                sx, sz = source[0], source[1]
+                ax.text(sx, sz, "v", color="red", fontsize=10, ha="center", va="center", fontweight="bold", alpha=alpha_survey)
+        ax.autoscale(False)
+        ax.set_xlim(0, nx * dx)
+        ax.set_ylim(nz * dz, 0)
+        self.ax = ax
+        self._w = self._h = None
+
+    def render_frame(self, snapshot_2d, time_ms, component_label):
+        self.snapshot_im.set_data(snapshot_2d)
+        self.ax.set_title("t = {} ms, {}".format(int(round(time_ms)), component_label), fontsize=10)
+        self.canvas.draw()
+        w, h = self.canvas.get_width_height()
+        buf = np.asarray(self.canvas.buffer_rgba()).reshape((h, w, 4))
+        return buf[:, :, :3].copy()
+
+
+class ExportSnapshotGifDialog(QDialog):
+    """Export → Snapshot Animation: настройки GIF (оверлеи, задержка, цикл, размер)."""
+    def __init__(self, parent=None, include_overlays=True, delay_ms=80, loop=0,
+                 frame_step=2, default_width_px=600, default_height_px=400):
+        super().__init__(parent)
+        self.setWindowTitle("Export — Snapshot Animation (GIF)")
+        layout = QFormLayout(self)
+        self._chk_overlays = QCheckBox()
+        self._chk_overlays.setChecked(include_overlays)
+        self._chk_overlays.setToolTip("Include model and survey overlay as on Z-X plane")
+        layout.addRow("Include Overlays:", self._chk_overlays)
+        self._width_spin = QSpinBox()
+        self._width_spin.setRange(100, 4096)
+        self._width_spin.setSuffix(" px")
+        self._width_spin.setValue(max(100, min(4096, default_width_px)))
+        self._width_spin.setToolTip("Export frame width (default: current Z-X plane size)")
+        layout.addRow("Width:", self._width_spin)
+        self._height_spin = QSpinBox()
+        self._height_spin.setRange(100, 4096)
+        self._height_spin.setSuffix(" px")
+        self._height_spin.setValue(max(100, min(4096, default_height_px)))
+        self._height_spin.setToolTip("Export frame height (default: current Z-X plane size)")
+        layout.addRow("Height:", self._height_spin)
+        self._frame_step_spin = QSpinBox()
+        self._frame_step_spin.setRange(1, 100)
+        self._frame_step_spin.setValue(max(1, min(100, int(frame_step))))
+        self._frame_step_spin.setToolTip("1 = all frames, 2 = every 2nd, 3 = every 3rd, …")
+        layout.addRow("Export every N-th frame:", self._frame_step_spin)
+        self._delay_spin = QSpinBox()
+        self._delay_spin.setRange(20, 2000)
+        self._delay_spin.setSuffix(" ms")
+        self._delay_spin.setValue(delay_ms)
+        self._delay_spin.setToolTip("Delay between frames")
+        layout.addRow("Frame delay:", self._delay_spin)
+        self._loop_spin = QSpinBox()
+        self._loop_spin.setRange(0, 10000)
+        self._loop_spin.setValue(loop)
+        self._loop_spin.setSpecialValueText("Infinite")
+        self._loop_spin.setToolTip("0 = loop forever")
+        layout.addRow("Loop (0=infinite):", self._loop_spin)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addRow(bb)
+
+    def get_include_overlays(self):
+        return self._chk_overlays.isChecked()
+
+    def get_delay_ms(self):
+        return self._delay_spin.value()
+
+    def get_loop(self):
+        return self._loop_spin.value()
+
+    def get_frame_step(self):
+        """Экспортировать каждый N-й кадр (1 = все)."""
+        return max(1, self._frame_step_spin.value())
+
+    def get_width_height_px(self):
+        """Возвращает (width, height) в пикселях для экспорта (dpi=100 → figsize в дюймах)."""
+        return (self._width_spin.value(), self._height_spin.value())
+
+
 class ModelParametersDialog(QDialog):
     def __init__(self, dx, dz, has_model=False, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Model — Parameters")
+        self.setWindowTitle("Model — Sampling")
         layout = QFormLayout(self)
         self.dx_spin = QDoubleSpinBox()
         self.dx_spin.setRange(0.1, 10000)
@@ -410,6 +585,269 @@ class ModelParametersDialog(QDialog):
 
     def get_resample(self):
         return self.resample_check.isChecked()
+
+
+class LayeredModelDialog(QDialog):
+    """Model -> Create Layered: генерация горизонтально-слоистой velocity-модели."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Model — Create Layered")
+        self._updating = False
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        # Defaults per requirement
+        self.nx_spin = QSpinBox()
+        self.nx_spin.setRange(2, 1000000)
+        self.nx_spin.setValue(201)
+        form.addRow("NX:", self.nx_spin)
+
+        self.nz_spin = QSpinBox()
+        self.nz_spin.setRange(2, 1000000)
+        self.nz_spin.setValue(201)
+        form.addRow("NZ:", self.nz_spin)
+
+        self.dx_spin = QDoubleSpinBox()
+        self.dx_spin.setRange(0.01, 100000)
+        self.dx_spin.setDecimals(2)
+        self.dx_spin.setValue(5.0)
+        self.dx_spin.setSuffix(" m")
+        form.addRow("DX:", self.dx_spin)
+
+        self.dz_spin = QDoubleSpinBox()
+        self.dz_spin.setRange(0.01, 100000)
+        self.dz_spin.setDecimals(2)
+        self.dz_spin.setValue(5.0)
+        self.dz_spin.setSuffix(" m")
+        form.addRow("DZ:", self.dz_spin)
+
+        self.x_extent_lbl = QLabel("")
+        self.z_extent_lbl = QLabel("")
+        form.addRow("X Extent:", self.x_extent_lbl)
+        form.addRow("Z Extent:", self.z_extent_lbl)
+
+        self.layers_spin = QSpinBox()
+        self.layers_spin.setRange(1, 10000)
+        self.layers_spin.setValue(3)
+        form.addRow("Layers:", self.layers_spin)
+
+        layout.addLayout(form)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Ztop", "Velocity"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, stretch=1)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._on_accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+        self.nx_spin.valueChanged.connect(self._update_extents)
+        self.nz_spin.valueChanged.connect(self._update_extents)
+        self.dx_spin.valueChanged.connect(self._update_extents)
+        self.dz_spin.valueChanged.connect(self._update_extents)
+        self.layers_spin.valueChanged.connect(self._on_layers_changed)
+
+        self._update_extents()
+        self._on_layers_changed(self.layers_spin.value(), initial=True)
+
+        self._result = None
+
+    def _extent_x(self):
+        nx = int(self.nx_spin.value())
+        dx = float(self.dx_spin.value())
+        return (nx - 1) * dx
+
+    def _extent_z(self):
+        nz = int(self.nz_spin.value())
+        dz = float(self.dz_spin.value())
+        return (nz - 1) * dz
+
+    def _update_extents(self):
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            self.x_extent_lbl.setText("{:.2f} m".format(self._extent_x()))
+            self.z_extent_lbl.setText("{:.2f} m".format(self._extent_z()))
+            # UX: при изменении extents поджать Ztop в таблице под новый Zmax
+            self._normalize_ztops()
+        finally:
+            self._updating = False
+
+    def _normalize_ztops(self):
+        """Нормализация Ztop под текущий Zmax без перестановки скоростей.
+
+        - Первая строка всегда 0
+        - Остальные: clamp в [0, Zmax-DZ] и строго возрастают (шаг >= DZ)
+        - Если из-за маленького Zmax строгий рост невозможен, раскладываем равномерно
+        """
+        n = int(self.table.rowCount() or 0)
+        if n <= 0:
+            return
+        zmax = max(0.0, float(self._extent_z()))
+        dz = float(self.dz_spin.value())
+        # Минимальный шаг: 1 dz (чтобы не получать Ztop == Zmax)
+        min_step = max(1e-6, dz)
+        # Верхняя граница для Ztop (кроме первой строки): Zmax - dz
+        ztop_cap = max(0.0, zmax - dz)
+
+        ztops = [self._get_row_value(r, 0, 0.0) for r in range(n)]
+        ztops[0] = 0.0
+        prev = 0.0
+        ok = True
+        for i in range(1, n):
+            zt = float(ztops[i])
+            zt = max(0.0, min(ztop_cap, zt))
+            if zt <= prev + 1e-12:
+                zt = min(ztop_cap, prev + min_step)
+            if zt <= prev + 1e-12 and ztop_cap > 0:
+                ok = False
+                break
+            ztops[i] = zt
+            prev = zt
+
+        if not ok and ztop_cap > 0:
+            # Раскладываем равномерно так, чтобы строго возрастало
+            step = ztop_cap / float(max(1, n))
+            prev = 0.0
+            ztops[0] = 0.0
+            for i in range(1, n):
+                cand = i * step
+                cand = max(0.0, min(ztop_cap, cand))
+                if cand <= prev + 1e-12:
+                    cand = min(ztop_cap, prev + min_step)
+                ztops[i] = cand
+                prev = cand
+
+        for r in range(n):
+            self._set_row_value(r, 0, 0.0 if r == 0 else ztops[r])
+
+    def _get_row_value(self, row, col, default=0.0):
+        it = self.table.item(row, col)
+        if it is None:
+            return float(default)
+        txt = (it.text() or "").strip()
+        if txt == "":
+            return float(default)
+        try:
+            return float(txt)
+        except Exception:
+            return float(default)
+
+    def _set_row_value(self, row, col, value):
+        it = self.table.item(row, col)
+        if it is None:
+            it = QTableWidgetItem()
+            self.table.setItem(row, col, it)
+        if isinstance(value, (int, np.integer)):
+            it.setText(str(int(value)))
+        else:
+            it.setText("{:.6g}".format(float(value)))
+
+    def _default_table_for_layers(self, n_layers):
+        # Requirement default example for 3 layers; for others: simple monotone guesses
+        if n_layers == 1:
+            return [(0.0, 2000.0)]
+        if n_layers == 3:
+            return [(0.0, 1800.0), (305.0, 2200.0), (605.0, 2500.0)]
+        zmax = max(0.0, self._extent_z())
+        dz = float(self.dz_spin.value())
+        ztop_cap = max(0.0, zmax - dz)
+        out = []
+        for i in range(n_layers):
+            ztop = 0.0 if i == 0 else min(ztop_cap, (ztop_cap * i) / max(1, n_layers))
+            vel = 1800.0 + 200.0 * i
+            out.append((ztop, vel))
+        out[0] = (0.0, out[0][1])
+        return out
+
+    def _on_layers_changed(self, n_layers, initial=False):
+        n_layers = int(n_layers)
+        old_rows = self.table.rowCount()
+        # preserve existing values where possible
+        old = [(self._get_row_value(r, 0, 0.0), self._get_row_value(r, 1, 2000.0)) for r in range(old_rows)]
+        self.table.setRowCount(n_layers)
+        if initial or old_rows == 0:
+            vals = self._default_table_for_layers(n_layers)
+        else:
+            vals = old[:n_layers]
+            if n_layers > len(vals):
+                # append new rows based on previous
+                zmax = max(0.0, self._extent_z())
+                dz = float(self.dz_spin.value())
+                ztop_cap = max(0.0, zmax - dz)
+                last_z = vals[-1][0] if vals else 0.0
+                last_v = vals[-1][1] if vals else 2000.0
+                for _ in range(n_layers - len(vals)):
+                    last_z = min(ztop_cap, last_z + 300.0)
+                    vals.append((last_z, last_v))
+        for r in range(n_layers):
+            ztop, vel = vals[r]
+            self._set_row_value(r, 0, 0.0 if r == 0 else ztop)
+            self._set_row_value(r, 1, vel)
+        # На всякий случай сразу нормализуем под текущие extents (исключить Ztop == Zmax)
+        self._normalize_ztops()
+
+    def _on_accept(self):
+        nx = int(self.nx_spin.value())
+        nz = int(self.nz_spin.value())
+        dx = float(self.dx_spin.value())
+        dz = float(self.dz_spin.value())
+        n_layers = int(self.layers_spin.value())
+        zmax = (nz - 1) * dz
+        ztop_cap = max(0.0, zmax - dz)
+
+        ztops = []
+        vels = []
+        for r in range(n_layers):
+            zt = self._get_row_value(r, 0, 0.0)
+            vv = self._get_row_value(r, 1, 2000.0)
+            ztops.append(float(zt))
+            vels.append(float(vv))
+
+        # validation
+        if n_layers < 1:
+            QMessageBox.warning(self, "Create Layered", "Layer Number must be >= 1.")
+            return
+        if abs(ztops[0]) > 1e-9:
+            QMessageBox.warning(self, "Create Layered", "First Ztop must be 0.")
+            return
+        prev = -1e-9
+        for i, zt in enumerate(ztops):
+            if i == 0:
+                lo, hi = 0.0, 0.0
+            else:
+                lo, hi = 0.0, ztop_cap
+            if zt < lo - 1e-9 or zt > hi + 1e-9:
+                QMessageBox.warning(
+                    self,
+                    "Create Layered",
+                    "Ztop out of range at row {} ({:.2f}..{:.2f}).".format(i + 1, lo, hi),
+                )
+                return
+            if i > 0 and (zt + 1e-9 <= prev):
+                QMessageBox.warning(self, "Create Layered", "Ztop must be strictly increasing (row {}).".format(i + 1))
+                return
+            if i > 0 and dz > 0 and (zt < prev + dz - 1e-9) and i != 0:
+                QMessageBox.warning(self, "Create Layered", "Ztop step must be >= DZ (row {}).".format(i + 1))
+                return
+            prev = zt
+        for i, vv in enumerate(vels):
+            if not np.isfinite(vv) or vv <= 0:
+                QMessageBox.warning(self, "Create Layered", "Velocity must be > 0 (row {}).".format(i + 1))
+                return
+
+        self._result = {"nx": nx, "nz": nz, "dx": dx, "dz": dz, "ztops": ztops, "vels": vels}
+        self.accept()
+
+    def get_result(self):
+        return self._result
 
 
 class SmoothDialog(QDialog):
@@ -558,20 +996,35 @@ class DiffractorsDialog(QDialog):
 
 
 class SourceDialog(QDialog):
-    def __init__(self, x=0, z=0, freq=22, parent=None):
+    def __init__(self, x=0, z=0, freq=22, parent=None, model_xmax=None, model_zmax=None, model_dz=None):
         super().__init__(parent)
         self.setWindowTitle("Survey — Source")
+        self._model_xmax = None if model_xmax is None else float(model_xmax)
+        self._model_zmax = None if model_zmax is None else float(model_zmax)
+        self._model_dz = None if model_dz is None else float(model_dz)
         layout = QFormLayout(self)
         self.x_spin = QDoubleSpinBox()
-        self.x_spin.setRange(-1e6, 1e6)
+        if self._model_xmax is None:
+            self.x_spin.setRange(-1e6, 1e6)
+        else:
+            # Ограничить в пределах модели
+            self.x_spin.setRange(0.0, max(0.0, self._model_xmax))
         self.x_spin.setDecimals(1)
         self.x_spin.setValue(x)
         layout.addRow("X (m):", self.x_spin)
         self.z_spin = QDoubleSpinBox()
-        self.z_spin.setRange(0, 1e6)
+        if self._model_zmax is None:
+            self.z_spin.setRange(0, 1e6)
+        else:
+            self.z_spin.setRange(0.0, max(0.0, self._model_zmax))
         self.z_spin.setDecimals(1)
         self.z_spin.setValue(z)
         layout.addRow("Z (m):", self.z_spin)
+        self.btn_surface_center = QPushButton("Surface Center")
+        self.btn_surface_center.setToolTip("Set X to center of model X extent and Z to dz")
+        self.btn_surface_center.setEnabled(self._model_xmax is not None and self._model_dz is not None)
+        self.btn_surface_center.clicked.connect(self._on_surface_center)
+        layout.addRow("", self.btn_surface_center)
         self.freq_spin = QDoubleSpinBox()
         self.freq_spin.setRange(1, 500)
         self.freq_spin.setDecimals(1)
@@ -579,24 +1032,51 @@ class SourceDialog(QDialog):
         self.freq_spin.setSuffix(" Hz")
         layout.addRow("Freq — Ricker frequency (Hz):", self.freq_spin)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
+        bb.accepted.connect(self._on_accept)
         bb.rejected.connect(self.reject)
         layout.addRow(bb)
+
+    def _on_surface_center(self):
+        if self._model_xmax is None or self._model_dz is None:
+            return
+        x = 0.5 * float(self._model_xmax)
+        z = float(self._model_dz)
+        # clamp to allowed ranges just in case
+        x = max(self.x_spin.minimum(), min(self.x_spin.maximum(), x))
+        z = max(self.z_spin.minimum(), min(self.z_spin.maximum(), z))
+        self.x_spin.setValue(x)
+        self.z_spin.setValue(z)
+
+    def _on_accept(self):
+        x = float(self.x_spin.value())
+        z = float(self.z_spin.value())
+        if self._model_xmax is not None:
+            if x < 0.0 - 1e-9 or x > self._model_xmax + 1e-9:
+                QMessageBox.warning(self, "Survey — Source", "X is out of model extent (0..{:.2f}).".format(self._model_xmax))
+                return
+        if self._model_zmax is not None:
+            if z < 0.0 - 1e-9 or z > self._model_zmax + 1e-9:
+                QMessageBox.warning(self, "Survey — Source", "Z is out of model extent (0..{:.2f}).".format(self._model_zmax))
+                return
+        self.accept()
 
     def get_params(self):
         return self.x_spin.value(), self.z_spin.value(), self.freq_spin.value()
 
 
 class ReceiversDialog(QDialog):
-    def __init__(self, receivers=None, layout_name="Profile", parent=None):
+    def __init__(self, receivers=None, layout_name="Profile", parent=None, model_xmax=None, model_zmax=None):
         super().__init__(parent)
         self.setWindowTitle("Survey — Receivers")
+        self._model_xmax = None if model_xmax is None else float(model_xmax)
+        self._model_zmax = None if model_zmax is None else float(model_zmax)
+        self._updating = False
         layout = QVBoxLayout(self)
         grp = QGroupBox("Receiver layout type")
         self.radio_profile = QRadioButton("Profile")
         self.radio_well = QRadioButton("Well")
         # Значения по умолчанию (если приёмников нет или не удаётся восстановить)
-        p_z, p_x0, p_nx, p_xstep = 100.0, 0.0, 50, 5.0
+        p_z, p_x0, p_nx, p_xstep = 0.0, 0.0, 50, 5.0
         w_x, w_z0, w_nz, w_zstep = 500.0, 0.0, 100, 5.0
         if receivers and len(receivers) > 0:
             xs = [r[0] for r in receivers]
@@ -638,6 +1118,9 @@ class ReceiversDialog(QDialog):
         self.p_xstep.setRange(0.1, 1000)
         self.p_xstep.setValue(p_xstep)
         f_profile.addRow("X step (m):", self.p_xstep)
+        self.btn_fill_profile = QPushButton("Fill Extent")
+        self.btn_fill_profile.clicked.connect(self._fill_extent_profile)
+        f_profile.addRow("", self.btn_fill_profile)
         layout.addWidget(self.form_profile)
 
         self.form_well = QFrame()
@@ -658,6 +1141,9 @@ class ReceiversDialog(QDialog):
         self.w_zstep.setRange(0.1, 1000)
         self.w_zstep.setValue(w_zstep)
         f_well.addRow("Z step (m):", self.w_zstep)
+        self.btn_fill_well = QPushButton("Fill Extent")
+        self.btn_fill_well.clicked.connect(self._fill_extent_well)
+        f_well.addRow("", self.btn_fill_well)
         layout.addWidget(self.form_well)
         self.form_well.setVisible(self.radio_well.isChecked())
         self.form_profile.setVisible(self.radio_profile.isChecked())
@@ -665,12 +1151,101 @@ class ReceiversDialog(QDialog):
         def toggled():
             self.form_profile.setVisible(self.radio_profile.isChecked())
             self.form_well.setVisible(self.radio_well.isChecked())
+            self._apply_constraints()
         self.radio_profile.toggled.connect(toggled)
+
+        # Ограничения по модели: не позволять NX/NZ уходить за пределы extents
+        self.p_x0.valueChanged.connect(self._apply_constraints)
+        self.p_nx.valueChanged.connect(self._apply_constraints)
+        self.p_xstep.valueChanged.connect(self._apply_constraints)
+        self.w_z0.valueChanged.connect(self._apply_constraints)
+        self.w_nz.valueChanged.connect(self._apply_constraints)
+        self.w_zstep.valueChanged.connect(self._apply_constraints)
+        self._apply_constraints()
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
+
+    def _max_count_for_extent(self, start, step, maxv):
+        """Максимальное N, чтобы start + (N-1)*step <= maxv."""
+        if maxv is None:
+            return None
+        try:
+            start = float(start)
+            step = float(step)
+            maxv = float(maxv)
+        except Exception:
+            return None
+        if step <= 0:
+            return 1
+        if maxv < start:
+            return 1
+        return int(np.floor((maxv - start) / step)) + 1
+
+    def _apply_constraints(self):
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            if self.radio_profile.isChecked():
+                nmax = self._max_count_for_extent(self.p_x0.value(), self.p_xstep.value(), self._model_xmax)
+                if nmax is not None:
+                    nmax = max(1, nmax)
+                    if self.p_nx.value() > nmax:
+                        self.p_nx.setValue(nmax)
+                    self.p_nx.setMaximum(max(1, nmax))
+            else:
+                nmax = self._max_count_for_extent(self.w_z0.value(), self.w_zstep.value(), self._model_zmax)
+                if nmax is not None:
+                    nmax = max(1, nmax)
+                    if self.w_nz.value() > nmax:
+                        self.w_nz.setValue(nmax)
+                    self.w_nz.setMaximum(max(1, nmax))
+        finally:
+            self._updating = False
+
+    def _fill_extent_profile(self):
+        # Заполнить от 0 до Xmax с текущим шагом
+        if self._model_xmax is None:
+            return
+        step = float(self.p_xstep.value())
+        if step <= 0:
+            return
+        # Сначала сбросить X0, затем обновить ограничения (в т.ч. максимум NX),
+        # и только потом выставлять NX — иначе setValue() может быть обрезан старым maximum.
+        self._updating = True
+        try:
+            self.p_x0.setValue(0.0)
+        finally:
+            self._updating = False
+        self._apply_constraints()
+        nmax = self._max_count_for_extent(0.0, step, self._model_xmax)
+        if nmax is None:
+            return
+        self.p_nx.setValue(max(1, nmax))
+        self._apply_constraints()
+
+    def _fill_extent_well(self):
+        # Заполнить от 0 до Zmax с текущим шагом
+        if self._model_zmax is None:
+            return
+        step = float(self.w_zstep.value())
+        if step <= 0:
+            return
+        # Аналогично Profile: сперва обновить ограничения, чтобы максимум NZ был актуален
+        self._updating = True
+        try:
+            self.w_z0.setValue(0.0)
+        finally:
+            self._updating = False
+        self._apply_constraints()
+        nmax = self._max_count_for_extent(0.0, step, self._model_zmax)
+        if nmax is None:
+            return
+        self.w_nz.setValue(max(1, nmax))
+        self._apply_constraints()
 
     def get_layout(self):
         """Возвращает 'Profile' или 'Well' в зависимости от выбранного типа расстановки."""
@@ -1045,6 +1620,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Sim1Shot2D — Model & Survey")
         self._vp = None
         self._dx = self._dz = 1.0
+        # SEG-Y (self._model_file_path) и Layered Model (self._layered_model_spec) — взаимоисключающие режимы
+        self._layered_model_spec = None  # {"nx","nz","dx","dz","ztops","vels"} или None
         self._diffractors = []
         self._source = None  # (x, z, freq)
         self._receivers = []
@@ -1053,7 +1630,7 @@ class MainWindow(QMainWindow):
             "snapshot_dt_ms": 2, "laplacian": "4pt",
         }
         self._smooth_size_m = 0.0
-        self._forward_runs = []   # [{"name": str, "snapshots": {"P fwd", "Vz fwd", "Vx fwd"}, "seismogram_data", "seismogram_t_ms"}, ...]
+        self._forward_runs = []   # [{"name": str, "snapshots": {"P fwd", "Vz fwd", "Vx fwd"}, "seismograms": {"P","Vz","Vx"}, "seismogram_t_ms"}, ...]
         self._backward_runs = []  # [{"name": str, "snapshots": {"P bwd", "Vz bwd", "Vx bwd"}, "seismogram_source": str}, ...]
         self._current_fwd_name = None   # имя набора fwd для отображения снапшотов
         self._current_bwd_name = None   # имя набора bwd для отображения снапшотов
@@ -1061,6 +1638,7 @@ class MainWindow(QMainWindow):
         self._snapshots = None   # эффективный dict для отображения (merge current fwd + current bwd)
         self._seismogram_data = None
         self._seismogram_t_ms = None
+        self._seismogram_component = "P"
         self._pending_forward_name = None
         self._pending_backward_name = None
         self._pending_backward_seismogram_name = None
@@ -1069,6 +1647,15 @@ class MainWindow(QMainWindow):
         self._rtm_settings = {"source": "P"}
         self._rtm_postproc = {"laplacian_on": False, "laplacian_order": 4, "agc_on": False, "agc_window_z_m": 1000.0}
         self._receiver_layout = "Profile"  # "Profile" или "Well" — для осей сейсмограммы
+        # Последние использованные настройки экспорта анимации снапшотов (сеансовые)
+        self._snapshot_gif_settings = {
+            "include_overlays": True,
+            "width_px": 600,
+            "height_px": 400,
+            "delay_ms": 80,
+            "loop": 0,
+            "frame_step": 2,
+        }
         self._project_path = None  # путь к текущему файлу проекта (.ini) или None
         self._model_file_path = ""  # путь к загруженному SEG-Y модели
         self._vp_full = None  # оригинальная модель до кропа (референс для Crop)
@@ -1083,10 +1670,15 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self._layer_panel = self._build_layer_panel()
         row.addWidget(self._layer_panel)
-        # Колонка: холст Z-X + Snapshot Percentile снизу
+        # Колонка: заголовок Z-X Plane + холст + Snapshot Percentile снизу
         canvas_column = QWidget()
         canvas_col_layout = QVBoxLayout(canvas_column)
-        canvas_col_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_col_layout.setContentsMargins(2, 2, 2, 2)
+        canvas_col_layout.setSpacing(2)
+        self._canvas_title = QLabel("Z-X Plane")
+        self._canvas_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        self._canvas_title.setAlignment(Qt.AlignHCenter)
+        canvas_col_layout.addWidget(self._canvas_title)
         self.canvas = VelocityCanvas(self)
         canvas_col_layout.addWidget(self.canvas, stretch=1)
         self._snapshot_percentile_row = QWidget()
@@ -1111,10 +1703,15 @@ class MainWindow(QMainWindow):
         snap_pl.addStretch()
         canvas_col_layout.addWidget(self._snapshot_percentile_row)
         row.addWidget(canvas_column, stretch=1)
-        # Колонка: сейсмограмма + Seismogram Percentile снизу
+        # Колонка: заголовок Seismogram + сейсмограмма + Seismogram Percentile снизу
         seismogram_column = QWidget()
         seis_col_layout = QVBoxLayout(seismogram_column)
-        seis_col_layout.setContentsMargins(0, 0, 0, 0)
+        seis_col_layout.setContentsMargins(2, 2, 2, 2)
+        seis_col_layout.setSpacing(2)
+        self._seismogram_title = QLabel("Seismogram")
+        self._seismogram_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        self._seismogram_title.setAlignment(Qt.AlignHCenter)
+        seis_col_layout.addWidget(self._seismogram_title)
         self.seismogram_canvas = SeismogramCanvas(self)
         self.seismogram_canvas.set_layout(self._receiver_layout)
         seis_col_layout.addWidget(self.seismogram_canvas, stretch=1)
@@ -1183,15 +1780,22 @@ class MainWindow(QMainWindow):
         act_save_as.triggered.connect(self._file_save_project_as)
         file_menu.addAction(act_save_as)
         file_menu.addSeparator()
+        act_reset = QAction("Reset Project", self)
+        act_reset.triggered.connect(self._file_reset_project)
+        file_menu.addAction(act_reset)
+        file_menu.addSeparator()
         act_exit = QAction("Exit", self)
         act_exit.triggered.connect(self._file_exit)
         file_menu.addAction(act_exit)
 
         model_menu = menubar.addMenu("&Model")
-        act_open = QAction("Open", self)
+        act_open = QAction("Load SEG-Y", self)
         act_open.triggered.connect(self._model_open)
         model_menu.addAction(act_open)
-        act_params = QAction("Parameters", self)
+        act_create_layered = QAction("Create Layered", self)
+        act_create_layered.triggered.connect(self._model_create_layered)
+        model_menu.addAction(act_create_layered)
+        act_params = QAction("Sampling", self)
         act_params.triggered.connect(self._model_parameters)
         model_menu.addAction(act_params)
         act_crop = QAction("Crop", self)
@@ -1236,6 +1840,11 @@ class MainWindow(QMainWindow):
         act_rtm_postproc.triggered.connect(self._rtm_post_processing_dialog)
         rtm_menu.addAction(act_rtm_postproc)
 
+        export_menu = menubar.addMenu("E&xport")
+        act_snapshot_gif = QAction("Snapshot Animation", self)
+        act_snapshot_gif.triggered.connect(self._export_snapshot_animation)
+        export_menu.addAction(act_snapshot_gif)
+
     def _build_layer_panel(self):
         panel = QFrame()
         panel.setFrameStyle(QFrame.StyledPanel)
@@ -1253,6 +1862,15 @@ class MainWindow(QMainWindow):
         gl_current.addRow("Current Seismogram:", self._combo_current_seismogram)
         grp_current.setLayout(gl_current)
         layout.addWidget(grp_current)
+        grp_seis = QGroupBox("Seismogram")
+        gl_seis = QFormLayout()
+        self._combo_seismogram_component = QComboBox()
+        self._combo_seismogram_component.addItems(["P", "Vz", "Vx"])
+        self._combo_seismogram_component.setCurrentText(getattr(self, "_seismogram_component", "P") or "P")
+        self._combo_seismogram_component.currentTextChanged.connect(self._on_seismogram_component_changed)
+        gl_seis.addRow("Component:", self._combo_seismogram_component)
+        grp_seis.setLayout(gl_seis)
+        layout.addWidget(grp_seis)
         grp = QGroupBox("Z-X layers")
         gl = QGridLayout()
         self._chk_original = QCheckBox("Original model")
@@ -1359,8 +1977,10 @@ class MainWindow(QMainWindow):
             self.seismogram_canvas.set_seismogram(None, None, [], self._receiver_layout, self._dx, self._dz)
             return
         r = self._get_forward_run(self._current_seismogram_name)
-        if r and r.get("seismogram_data") is not None and r.get("seismogram_t_ms") is not None:
-            self._seismogram_data = r["seismogram_data"]
+        comp = getattr(self, "_seismogram_component", "P") or "P"
+        seis_map = (r.get("seismograms") or {}) if r else {}
+        if r and seis_map.get(comp) is not None and r.get("seismogram_t_ms") is not None:
+            self._seismogram_data = seis_map.get(comp)
             self._seismogram_t_ms = r["seismogram_t_ms"]
             self.seismogram_canvas.set_seismogram(
                 self._seismogram_data,
@@ -1374,6 +1994,13 @@ class MainWindow(QMainWindow):
             self._seismogram_data = None
             self._seismogram_t_ms = None
         self._update_layer_availability()
+
+    def _on_seismogram_component_changed(self, comp):
+        comp = (comp or "P").strip()
+        if comp not in ("P", "Vz", "Vx"):
+            comp = "P"
+        self._seismogram_component = comp
+        self._apply_current_seismogram()
 
     def _refresh_current_combos(self):
         """Заполняет комбобоксы Current из _forward_runs и _backward_runs."""
@@ -1645,20 +2272,233 @@ class MainWindow(QMainWindow):
                 self, "Save Project As",
                 "Failed to save project:\n\n{}".format(e))
 
+    def _file_reset_project(self):
+        """Сброс проекта в начальное состояние (как при запуске программы)."""
+        reply = QMessageBox.question(
+            self,
+            "Reset Project",
+            "Reset all data (model, survey, runs, RTM) to initial state? Unsaved changes will be lost.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        # Сброс буферов runs и визуализации
+        self._forward_runs = []
+        self._backward_runs = []
+        self._current_fwd_name = None
+        self._current_bwd_name = None
+        self._current_seismogram_name = None
+        self._snapshots = None
+        self._seismogram_data = None
+        self._seismogram_t_ms = None
+        self._pending_forward_name = None
+        self._pending_backward_name = None
+        self._pending_backward_seismogram_name = None
+        self._rtm_image = None
+        self._rtm_image_base = None
+        self.canvas.set_snapshot_2d(None)
+        self.canvas.set_rtm_image(None)
+        if hasattr(self, "seismogram_canvas") and self.seismogram_canvas is not None:
+            self.seismogram_canvas.set_seismogram(None, None, [], "Profile", 1.0, 1.0)
+        # Модель
+        self._vp = None
+        self._vp_full = None
+        self._dx = self._dz = 1.0
+        self._model_file_path = ""
+        self._layered_model_spec = None
+        self._crop_x_left = 0.0
+        self._crop_x_right = 0.0
+        self._crop_z_top = 0.0
+        self._crop_z_bottom = 0.0
+        self._diffractors = []
+        self._smooth_size_m = 0.0
+        # Съёмка
+        self._source = None
+        self._receivers = []
+        self._receiver_layout = "Profile"
+        # Параметры симуляции и RTM — к дефолтам
+        self._sim_settings = {
+            "tmax_ms": 1000, "npml": 50, "dt_ms": 0.5,
+            "snapshot_dt_ms": 2, "laplacian": "4pt",
+        }
+        self._rtm_settings = {"source": "P"}
+        self._rtm_postproc = {"laplacian_on": False, "laplacian_order": 4, "agc_on": False, "agc_window_z_m": 1000.0}
+        self._seismogram_component = "P"
+        self._project_path = None
+        self._last_model_source = "Original"
+        if hasattr(self, "_combo_seismogram_component"):
+            self._combo_seismogram_component.blockSignals(True)
+            self._combo_seismogram_component.setCurrentText("P")
+            self._combo_seismogram_component.blockSignals(False)
+        if hasattr(self, "seismogram_canvas"):
+            self.seismogram_canvas.set_layout("Profile")
+        self._apply_velocity_to_canvas()
+        self._refresh_current_combos()
+        self._apply_current_seismogram()
+        self._rebuild_effective_snapshots()
+        self._update_layer_availability()
+        self._update_memory_status()
+        self.setWindowTitle("Sim1Shot2D — Model & Survey")
+
     def _file_exit(self):
         QApplication.quit()
+
+    def _export_snapshot_animation(self):
+        """Export → Snapshot Animation: GIF из текущих снапшотов (те же, что на Z-X plane), без RTM."""
+        if self._vp is None or self._vp.size == 0:
+            QMessageBox.warning(self, "Export", "Load model first.")
+            return
+        comp = self._snapshot_combo.currentText()
+        arr = (self._snapshots or {}).get(comp) if comp else None
+        if arr is None:
+            QMessageBox.warning(self, "Export", "No snapshot data. Select a snapshot component on Z-X plane and ensure Snapshots are available.")
+            return
+        n_save = arr.shape[0] if hasattr(arr, "shape") and getattr(arr, "ndim", 0) == 3 else 0
+        if n_save == 0:
+            QMessageBox.warning(self, "Export", "No snapshot frames.")
+            return
+        include_overlays_current = self._chk_original.isChecked() or self._chk_survey.isChecked() or self._chk_smoothed.isChecked()
+        cw = self.canvas.size().width() if self.canvas else 0
+        ch = self.canvas.size().height() if self.canvas else 0
+        default_w = max(100, cw) if cw else 600
+        default_h = max(100, ch) if ch else 400
+        # Подхватываем последние использованные настройки (сеансовые)
+        s = getattr(self, "_snapshot_gif_settings", None) or {}
+        include_overlays_def = s.get("include_overlays", include_overlays_current)
+        delay_def = s.get("delay_ms", 80)
+        loop_def = s.get("loop", 0)
+        frame_step_def = s.get("frame_step", 2)
+        width_def = s.get("width_px", default_w)
+        height_def = s.get("height_px", default_h)
+        dlg = ExportSnapshotGifDialog(
+            self,
+            include_overlays=include_overlays_def,
+            delay_ms=int(delay_def),
+            loop=int(loop_def),
+            frame_step=int(frame_step_def),
+            default_width_px=int(width_def),
+            default_height_px=int(height_def),
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save GIF", "", "GIF (*.gif);;All (*)")
+        if not path:
+            return
+        if not path.endswith(".gif"):
+            path = path + ".gif"
+        try:
+            from PIL import Image
+        except ImportError:
+            QMessageBox.warning(self, "Export", "Pillow (PIL) is required for GIF export. Install: pip install Pillow")
+            return
+        # Percentile для снапшотов (как на Z-X)
+        if hasattr(arr, "read_full"):
+            arr_p = snapshot_io.sample_frames_for_percentile(arr._path, arr._dset_name)
+        else:
+            arr_p = np.asarray(arr, dtype=np.float64)
+        p_snap = self._snapshot_percentile_spin.value()
+        snapshot_vmin, snapshot_vmax = np.percentile(arr_p, [100 - p_snap, p_snap])
+        if snapshot_vmax <= snapshot_vmin:
+            snapshot_vmax = snapshot_vmin + 1.0
+        include_overlays = dlg.get_include_overlays()
+        delay_ms = dlg.get_delay_ms()
+        loop = dlg.get_loop()
+        frame_step = dlg.get_frame_step()
+        export_w, export_h = dlg.get_width_height_px()
+        # Сохраняем настройки экспорта для следующего захода в меню
+        self._snapshot_gif_settings = {
+            "include_overlays": bool(include_overlays),
+            "width_px": int(export_w),
+            "height_px": int(export_h),
+            "delay_ms": int(delay_ms),
+            "loop": int(loop),
+            "frame_step": int(frame_step),
+        }
+        dpi = 100
+        figsize = (export_w / dpi, export_h / dpi)
+        vp = np.asarray(self._vp, dtype=np.float64)
+        smoothed_vp = None
+        if self.canvas._smoothed_vp is not None and self.canvas._smoothed_vp.shape == vp.shape:
+            smoothed_vp = np.asarray(self.canvas._smoothed_vp, dtype=np.float64)
+        alpha_orig = self._alpha_original.value() if include_overlays else 0.0
+        alpha_surv = self._alpha_survey.value() if include_overlays else 0.0
+        alpha_smooth = self._alpha_smoothed.value() if include_overlays else 0.0
+        alpha_snap = self._alpha_snapshots.value()
+        snapshot_dt_ms = self._sim_settings.get("snapshot_dt_ms", 2.0)
+        comp_short = comp.replace(" fwd", "").replace(" bwd", "")
+        run_name = self._current_fwd_name if " fwd" in comp else self._current_bwd_name
+        component_label = "{} {}".format(comp_short, run_name or ("fwd" if " fwd" in comp else "bwd"))
+        frames = []
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            # Быстрый путь: один холст, обновляем только снапшот и заголовок (значительное ускорение)
+            ctx = _SnapshotGifRendererCtx(
+                vp, self._dx, self._dz, self._receivers, self._source, smoothed_vp,
+                include_overlays, alpha_orig, alpha_surv, alpha_smooth, alpha_snap,
+                snapshot_vmin, snapshot_vmax, figsize=figsize, dpi=dpi,
+            )
+            indices = list(range(0, n_save, frame_step))
+            for idx, i in enumerate(indices):
+                self.statusBar().showMessage("Export frame {}/{}".format(idx + 1, len(indices)))
+                QApplication.processEvents()
+                time_ms = i * snapshot_dt_ms
+                frame_2d = arr[i]
+                if hasattr(frame_2d, "shape") and frame_2d.ndim == 2:
+                    snapshot_2d = np.asarray(frame_2d, dtype=np.float64).T
+                else:
+                    snapshot_2d = np.asarray(frame_2d, dtype=np.float64)
+                    if snapshot_2d.shape != vp.shape:
+                        snapshot_2d = snapshot_2d.T
+                rgb = ctx.render_frame(snapshot_2d, time_ms, component_label)
+                frames.append(Image.fromarray(rgb))
+            if not frames:
+                QMessageBox.warning(self, "Export", "No frames to export.")
+                return
+            frames[0].save(path, save_all=True, append_images=frames[1:], duration=delay_ms, loop=loop)
+            self.statusBar().clearMessage()
+            QMessageBox.information(self, "Export", "GIF saved: {} ({} frames).".format(path, len(frames)))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.statusBar().clearMessage()
+            QMessageBox.warning(self, "Export", "Export failed:\n\n{}".format(e))
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _save_project_to_ini(self, path):
         cfg = ConfigParser()
         cfg.add_section("model")
+        base_dir = os.path.dirname(os.path.abspath(path))
+        layered = getattr(self, "_layered_model_spec", None)
         model_file = getattr(self, "_model_file_path", "") or ""
-        if model_file and os.path.isabs(model_file):
-            base_dir = os.path.dirname(os.path.abspath(path))
-            try:
-                model_file = os.path.relpath(model_file, base_dir)
-            except ValueError:
-                pass
-        cfg.set("model", "file", model_file)
+
+        if layered:
+            # Layered model хранится параметрами и регенерируется при загрузке проекта.
+            # Взаимоисключающе с SEG-Y.
+            cfg.set("model", "type", "layered")
+            cfg.set("model", "file", "")
+            nx = int(layered.get("nx", (self._vp_full.shape[1] if self._vp_full is not None else 0)))
+            nz = int(layered.get("nz", (self._vp_full.shape[0] if self._vp_full is not None else 0)))
+            cfg.set("model", "layered_nx", str(nx))
+            cfg.set("model", "layered_nz", str(nz))
+            cfg.set("model", "layered_dx", str(float(layered.get("dx", self._dx))))
+            cfg.set("model", "layered_dz", str(float(layered.get("dz", self._dz))))
+            ztops = list(layered.get("ztops", [0.0]))
+            vels = list(layered.get("vels", [2000.0]))
+            n_layers = max(1, min(len(ztops), len(vels)))
+            cfg.set("model", "layered_layer_count", str(n_layers))
+            for i in range(n_layers):
+                cfg.set("model", "layered_{}_ztop".format(i), str(float(ztops[i])))
+                cfg.set("model", "layered_{}_vel".format(i), str(float(vels[i])))
+        else:
+            if model_file and os.path.isabs(model_file):
+                try:
+                    model_file = os.path.relpath(model_file, base_dir)
+                except ValueError:
+                    pass
+            cfg.set("model", "type", "segy" if model_file else "none")
+            cfg.set("model", "file", model_file)
         cfg.set("model", "dx", str(self._dx))
         cfg.set("model", "dz", str(self._dz))
         cfg.set("model", "smooth_size_m", str(self._smooth_size_m))
@@ -1717,6 +2557,7 @@ class MainWindow(QMainWindow):
         bwd_with_h5 = [r for r in (self._backward_runs or []) if r.get("snapshots_path")]
         if fwd_with_h5 or bwd_with_h5:
             cfg.add_section("runs")
+            cfg.set("runs", "seismogram_component", getattr(self, "_seismogram_component", "P") or "P")
             cfg.set("runs", "forward_count", str(len(fwd_with_h5)))
             for i, r in enumerate(fwd_with_h5):
                 cfg.set("runs", "forward_{}_name".format(i), r["name"])
@@ -1782,15 +2623,52 @@ class MainWindow(QMainWindow):
             self._vp_full = None
             self._vp = None
             self._model_file_path = None
+            self._layered_model_spec = None
+            model_type = cfg.get("model", "type", fallback="").strip().lower()
             model_file = cfg.get("model", "file", fallback="").strip()
-            if model_file and not os.path.isabs(model_file):
-                model_file = os.path.normpath(os.path.join(base_dir, model_file))
-            if model_file and os.path.isfile(model_file):
-                vp, dx_load, dz_load = load_velocity_from_segy(model_file)
-                if vp is not None:
-                    self._vp_full = np.asarray(vp, dtype=np.float64, copy=True)
-                    self._vp = self._vp_full
-                    self._model_file_path = os.path.abspath(model_file)
+            has_layered_keys = cfg.has_option("model", "layered_layer_count") or cfg.has_option("model", "layered_nx")
+            if model_type == "layered" or (not model_file and has_layered_keys):
+                nx = cfg.getint("model", "layered_nx", fallback=201)
+                nz = cfg.getint("model", "layered_nz", fallback=201)
+                dx_l = cfg.getfloat("model", "layered_dx", fallback=cfg.getfloat("model", "dx", fallback=self._dx))
+                dz_l = cfg.getfloat("model", "layered_dz", fallback=cfg.getfloat("model", "dz", fallback=self._dz))
+                n_layers = max(1, cfg.getint("model", "layered_layer_count", fallback=1))
+                ztops = []
+                vels = []
+                for i in range(n_layers):
+                    ztops.append(cfg.getfloat("model", "layered_{}_ztop".format(i), fallback=0.0))
+                    vels.append(cfg.getfloat("model", "layered_{}_vel".format(i), fallback=2000.0))
+                # generate vp
+                z_arr = np.arange(int(nz), dtype=np.float64) * float(dz_l)
+                vp_col = np.zeros((int(nz),), dtype=np.float64)
+                for i in range(len(ztops)):
+                    z0 = float(ztops[i])
+                    z1 = float(ztops[i + 1]) if i + 1 < len(ztops) else float("inf")
+                    mask = (z_arr >= z0) & (z_arr < z1)
+                    vp_col[mask] = float(vels[i])
+                if np.any(vp_col == 0):
+                    last_v = float(vels[-1]) if vels else 2000.0
+                    vp_col[vp_col == 0] = last_v
+                vp = np.repeat(vp_col[:, None], int(nx), axis=1)
+                self._vp_full = np.asarray(vp, dtype=np.float64, copy=True)
+                self._vp = self._vp_full
+                self._model_file_path = ""
+                self._layered_model_spec = {
+                    "nx": int(nx), "nz": int(nz), "dx": float(dx_l), "dz": float(dz_l),
+                    "ztops": list(map(float, ztops)), "vels": list(map(float, vels)),
+                }
+                # Зафиксировать sampling из layered, но далее ниже всё равно применится model/dx,dz
+                self._dx = float(dx_l)
+                self._dz = float(dz_l)
+            else:
+                if model_file and not os.path.isabs(model_file):
+                    model_file = os.path.normpath(os.path.join(base_dir, model_file))
+                if model_file and os.path.isfile(model_file):
+                    vp, dx_load, dz_load = load_velocity_from_segy(model_file)
+                    if vp is not None:
+                        self._vp_full = np.asarray(vp, dtype=np.float64, copy=True)
+                        self._vp = self._vp_full
+                        self._model_file_path = os.path.abspath(model_file)
             self._dx = cfg.getfloat("model", "dx", fallback=self._dx)
             self._dz = cfg.getfloat("model", "dz", fallback=self._dz)
             self._smooth_size_m = cfg.getfloat("model", "smooth_size_m", fallback=0.0)
@@ -1872,6 +2750,13 @@ class MainWindow(QMainWindow):
 
         # Подгрузка насчитанных снапшотов/сейсмограмм и RTM из проекта (H5 — только ссылки, первый кадр по требованию)
         if cfg.has_section("runs"):
+            self._seismogram_component = cfg.get("runs", "seismogram_component", fallback=getattr(self, "_seismogram_component", "P") or "P").strip() or "P"
+            if self._seismogram_component not in ("P", "Vz", "Vx"):
+                self._seismogram_component = "P"
+            if hasattr(self, "_combo_seismogram_component"):
+                self._combo_seismogram_component.blockSignals(True)
+                self._combo_seismogram_component.setCurrentText(self._seismogram_component)
+                self._combo_seismogram_component.blockSignals(False)
             n_fwd = cfg.getint("runs", "forward_count", fallback=0)
             for i in range(n_fwd):
                 name = cfg.get("runs", "forward_{}_name".format(i), fallback="")
@@ -1881,16 +2766,23 @@ class MainWindow(QMainWindow):
                 full_path = os.path.normpath(os.path.join(base_dir, rel_path)) if not os.path.isabs(rel_path) else rel_path
                 if not os.path.isfile(full_path):
                     continue
-                seismogram_data, seismogram_t_ms = snapshot_io.compute_seismogram_from_h5(
-                    full_path, self._receivers, self._dx, self._dz,
-                    snapshot_dt_ms=self._sim_settings.get("snapshot_dt_ms", 2.0),
-                )
+                seismograms = {}
+                seismogram_t_ms = None
+                for comp in ("P", "Vz", "Vx"):
+                    data_c, t_c = snapshot_io.compute_seismogram_from_h5(
+                        full_path, self._receivers, self._dx, self._dz,
+                        snapshot_dt_ms=self._sim_settings.get("snapshot_dt_ms", 2.0),
+                        component=comp,
+                    )
+                    seismograms[comp] = data_c
+                    if seismogram_t_ms is None:
+                        seismogram_t_ms = t_c
                 snapshots = snapshot_io.snapshots_dict_from_h5(full_path, "forward")
                 self._forward_runs.append({
                     "name": name,
                     "snapshots_path": full_path,
                     "snapshots": snapshots,
-                    "seismogram_data": seismogram_data,
+                    "seismograms": seismograms,
                     "seismogram_t_ms": seismogram_t_ms,
                 })
             n_bwd = cfg.getint("runs", "backward_count", fallback=0)
@@ -1959,9 +2851,89 @@ class MainWindow(QMainWindow):
         self._vp = self._vp_full
         self._dx, self._dz = dx, dz
         self._model_file_path = path
+        # SEG-Y и layered — взаимоисключающие
+        self._layered_model_spec = None
         self._crop_x_left = self._crop_x_right = 0.0
         self._crop_z_top = self._crop_z_bottom = 0.0
         self._apply_velocity_to_canvas()
+
+    def _model_create_layered(self):
+        dlg = LayeredModelDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        res = dlg.get_result() or {}
+        nx = int(res.get("nx", 201))
+        nz = int(res.get("nz", 201))
+        dx = float(res.get("dx", 5.0))
+        dz = float(res.get("dz", 5.0))
+        ztops = list(res.get("ztops", [0.0]))
+        vels = list(res.get("vels", [2000.0]))
+
+        has_model = self._vp_full is not None and getattr(self._vp_full, "size", 0) > 0
+        has_runs = len(self._forward_runs) > 0 or len(self._backward_runs) > 0
+        has_rtm = self._rtm_image is not None and getattr(self._rtm_image, "size", 0) > 0
+        if has_model or has_runs or has_rtm:
+            reply = QMessageBox.warning(
+                self,
+                "Create Layered",
+                "Existing model, snapshots, seismograms and RTM will be removed. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # build layered vp (nz, nx)
+        z_arr = np.arange(nz, dtype=np.float64) * dz
+        vp_col = np.zeros((nz,), dtype=np.float64)
+        for i in range(len(ztops)):
+            z0 = float(ztops[i])
+            z1 = float(ztops[i + 1]) if i + 1 < len(ztops) else float("inf")
+            mask = (z_arr >= z0) & (z_arr < z1)
+            vp_col[mask] = float(vels[i])
+        if np.any(vp_col == 0):
+            # fallback: fill any gaps with last velocity
+            last_v = float(vels[-1]) if vels else 2000.0
+            vp_col[vp_col == 0] = last_v
+        vp = np.repeat(vp_col[:, None], nx, axis=1)
+
+        self._vp_full = np.asarray(vp, dtype=np.float64, copy=True)
+        self._vp = self._vp_full
+        self._dx, self._dz = dx, dz
+        self._model_file_path = ""
+        # SEG-Y и layered — взаимоисключающие
+        self._layered_model_spec = {"nx": nx, "nz": nz, "dx": dx, "dz": dz, "ztops": list(ztops), "vels": list(vels)}
+        self._crop_x_left = self._crop_x_right = 0.0
+        self._crop_z_top = self._crop_z_bottom = 0.0
+        # Model-related objects: reset to be safe for new extents
+        self._diffractors = []
+        self._source = None
+        self._receivers = []
+
+        # Reset runs/visualization buffers (same as project load)
+        self._forward_runs = []
+        self._backward_runs = []
+        self._current_fwd_name = None
+        self._current_bwd_name = None
+        self._current_seismogram_name = None
+        self._snapshots = None
+        self._seismogram_data = None
+        self._seismogram_t_ms = None
+        self._rtm_image = None
+        self._rtm_image_base = None
+        self.canvas.set_snapshot_2d(None)
+        self.canvas.set_rtm_image(None)
+        if hasattr(self, "seismogram_canvas") and self.seismogram_canvas is not None:
+            self.seismogram_canvas.set_seismogram(
+                None, None, [], getattr(self, "_receiver_layout", "Profile"), self._dx, self._dz
+            )
+
+        self._apply_velocity_to_canvas()
+        self._refresh_current_combos()
+        self._apply_current_seismogram()
+        self._rebuild_effective_snapshots()
+        self._update_layer_availability()
+        self._update_memory_status()
 
     def _apply_velocity_to_canvas(self):
         vp_display = self._vp
@@ -2011,7 +2983,7 @@ class MainWindow(QMainWindow):
         if has_runs or has_rtm:
             reply = QMessageBox.warning(
                 self,
-                "Model Parameters",
+                "Model Sampling",
                 "Snapshots, seismograms and RTM will be removed. Continue?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
@@ -2077,7 +3049,7 @@ class MainWindow(QMainWindow):
 
     def _model_crop(self):
         if self._vp_full is None or self._vp_full.size == 0:
-            QMessageBox.warning(self, "Crop", "Load model first (Model → Open).")
+            QMessageBox.warning(self, "Crop", "Load model first (Model → Load SEG-Y).")
             return
         dlg = CropDialog(
             self._crop_x_left, self._crop_x_right,
@@ -2168,19 +3140,34 @@ class MainWindow(QMainWindow):
         self._apply_velocity_to_canvas()
 
     def _survey_source(self):
+        model_xmax = model_zmax = None
+        model_dz = None
+        if self._vp is not None and getattr(self._vp, "size", 0) > 0:
+            nz_m, nx_m = self._vp.shape
+            model_xmax = (nx_m - 1) * float(self._dx)
+            model_zmax = (nz_m - 1) * float(self._dz)
+            model_dz = float(self._dz)
         x, z, freq = 0, 0, 22
         if self._source is not None:
             x, z, freq = self._source[0], self._source[1], self._source[2]
-        dlg = SourceDialog(x, z, freq, self)
+        dlg = SourceDialog(x, z, freq, self, model_xmax=model_xmax, model_zmax=model_zmax, model_dz=model_dz)
         if dlg.exec_() == QDialog.Accepted:
             self._source = dlg.get_params()
             self._apply_velocity_to_canvas()
 
     def _survey_receivers(self):
+        # Ограничения приёмников: не выходить за пределы текущей модели
+        model_xmax = model_zmax = None
+        if self._vp is not None and getattr(self._vp, "size", 0) > 0:
+            nz_m, nx_m = self._vp.shape
+            model_xmax = (nx_m - 1) * float(self._dx)
+            model_zmax = (nz_m - 1) * float(self._dz)
         dlg = ReceiversDialog(
             receivers=self._receivers,
             layout_name=self._receiver_layout,
             parent=self,
+            model_xmax=model_xmax,
+            model_zmax=model_zmax,
         )
         if dlg.exec_() == QDialog.Accepted:
             self._receivers = dlg.get_receiver_points()
@@ -2189,10 +3176,18 @@ class MainWindow(QMainWindow):
             self._apply_velocity_to_canvas()
             # Пересобрать сейсмограммы всех forward-наборов по новой конфигурации приёмников
             for r in self._forward_runs:
-                p_fwd = (r.get("snapshots") or {}).get("P fwd")
-                if p_fwd is not None:
-                    data, t_ms = self._compute_seismogram_from_snapshots(p_fwd)
-                    r["seismogram_data"] = data
+                snaps = r.get("snapshots") or {}
+                seis = {}
+                t_ms = None
+                for comp in ("P", "Vz", "Vx"):
+                    arr = snaps.get(comp + " fwd")
+                    if arr is not None:
+                        data_c, t_c = self._compute_seismogram_from_snapshots(arr)
+                        if t_ms is None:
+                            t_ms = t_c
+                        seis[comp] = data_c
+                if seis:
+                    r["seismograms"] = seis
                     r["seismogram_t_ms"] = t_ms
             self._apply_current_seismogram()
 
@@ -2210,11 +3205,23 @@ class MainWindow(QMainWindow):
 
     def _simulation_run_forward(self):
         if self._vp is None or self._vp.size == 0:
-            QMessageBox.warning(self, "Run Forward", "Load model first (Model → Open).")
+            QMessageBox.warning(self, "Run Forward", "Load model first (Model → Load SEG-Y).")
             return
         if self._source is None:
             QMessageBox.warning(self, "Run Forward", "Set source (Survey → Source).")
             return
+        if not self._receivers:
+            reply = QMessageBox.question(
+                self,
+                "Run Forward",
+                "No receivers are defined (Survey → Receivers).\n"
+                "You will not get any seismogram data.\n\n"
+                "Do you want to continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
         default_name = "Fwd 1"
         existing = [r["name"] for r in self._forward_runs]
         for i in range(1, 1000):
@@ -2294,17 +3301,17 @@ class MainWindow(QMainWindow):
         self._progress_bar.setMaximum(total)
         self._progress_bar.setValue(current)
 
-    def _compute_seismogram_from_snapshots(self, p_history):
+    def _compute_seismogram_from_snapshots(self, history):
         """
-        Из снапшотов давления p_history (n_save, nx, nz) извлекает трассы
+        Из снапшотов компоненты history (n_save, nx, nz) извлекает трассы
         в позициях приёмников. Возвращает (data, t_ms): data (n_save, n_receivers), t_ms в мс.
         """
-        if p_history is None or p_history.size == 0 or not self._receivers:
+        if history is None or getattr(history, "size", 0) == 0 or not self._receivers:
             return None, None
-        p_history = np.asarray(p_history, dtype=np.float64)
-        if p_history.ndim != 3:
+        history = np.asarray(history, dtype=np.float64)
+        if history.ndim != 3:
             return None, None
-        n_save, nx, nz = p_history.shape
+        n_save, nx, nz = history.shape
         snapshot_dt_ms = self._sim_settings.get("snapshot_dt_ms", 2.0)
         t_ms = np.arange(n_save, dtype=np.float64) * snapshot_dt_ms
         data = np.zeros((n_save, len(self._receivers)), dtype=np.float64)
@@ -2314,7 +3321,7 @@ class MainWindow(QMainWindow):
             jz = int(round(z / dz))
             ix = max(0, min(nx - 1, ix))
             jz = max(0, min(nz - 1, jz))
-            data[:, rec_idx] = p_history[:, ix, jz]
+            data[:, rec_idx] = history[:, ix, jz]
         return data, t_ms
 
     def _on_forward_finished(self, result):
@@ -2329,17 +3336,24 @@ class MainWindow(QMainWindow):
             # Результат — либо (path,) при записи в HDF5, либо (p_history, vx_history, vz_history)
             if len(result) == 1 and isinstance(result[0], str):
                 h5_path = result[0]
-                # Сейсмограмму считаем по кадрам из HDF5, не загружая весь P в память (избегаем OOM)
-                def _seismogram_progress(current, total):
-                    self._progress_bar.setMaximum(total)
-                    self._progress_bar.setValue(current)
-                    self._progress_bar.setFormat("Seismogram %v / %m")
-                    QApplication.processEvents()
-                seismogram_data, seismogram_t_ms = snapshot_io.compute_seismogram_from_h5(
-                    h5_path, self._receivers, self._dx, self._dz,
-                    snapshot_dt_ms=self._sim_settings.get("snapshot_dt_ms", 2.0),
-                    progress_callback=_seismogram_progress,
-                )
+                # Сейсмограммы (P, Vz, Vx) считаем по кадрам из HDF5, без загрузки всего массива в память (избегаем OOM)
+                seismograms = {}
+                seismogram_t_ms = None
+                for comp in ("P", "Vz", "Vx"):
+                    def _seismogram_progress(current, total, _comp=comp):
+                        self._progress_bar.setMaximum(total)
+                        self._progress_bar.setValue(current)
+                        self._progress_bar.setFormat("Seismogram {} %v / %m".format(_comp))
+                        QApplication.processEvents()
+                    data_c, t_c = snapshot_io.compute_seismogram_from_h5(
+                        h5_path, self._receivers, self._dx, self._dz,
+                        snapshot_dt_ms=self._sim_settings.get("snapshot_dt_ms", 2.0),
+                        progress_callback=_seismogram_progress,
+                        component=comp,
+                    )
+                    seismograms[comp] = data_c
+                    if seismogram_t_ms is None:
+                        seismogram_t_ms = t_c
                 print("[Forward] seismogram from H5 done", flush=True)
                 snapshots = snapshot_io.snapshots_dict_from_h5(h5_path, "forward")
                 print("[Forward] snapshots_dict_from_h5 done", flush=True)
@@ -2348,18 +3362,24 @@ class MainWindow(QMainWindow):
                     "name": name,
                     "snapshots_path": h5_path,
                     "snapshots": snapshots,
-                    "seismogram_data": seismogram_data,
+                    "seismograms": seismograms,
                     "seismogram_t_ms": seismogram_t_ms,
                 })
                 print("[Forward] run appended", flush=True)
             else:
                 p_history, vx_history, vz_history = result
-                seismogram_data, seismogram_t_ms = self._compute_seismogram_from_snapshots(p_history)
+                seismograms = {}
+                seismogram_t_ms = None
+                for comp, arr in (("P", p_history), ("Vx", vx_history), ("Vz", vz_history)):
+                    data_c, t_c = self._compute_seismogram_from_snapshots(arr)
+                    seismograms[comp] = data_c
+                    if seismogram_t_ms is None:
+                        seismogram_t_ms = t_c
                 self._forward_runs = [r for r in self._forward_runs if r["name"] != name]
                 self._forward_runs.append({
                     "name": name,
                     "snapshots": {"P fwd": p_history, "Vz fwd": vz_history, "Vx fwd": vx_history},
-                    "seismogram_data": seismogram_data,
+                    "seismograms": seismograms,
                     "seismogram_t_ms": seismogram_t_ms,
                 })
                 print("[Forward] run appended (in-memory)", flush=True)
@@ -2425,16 +3445,20 @@ class MainWindow(QMainWindow):
             return
         self._pending_backward_name = dlg.get_name() or default_name
         source_type = dlg.get_seismogram_source_type()
+        comp = getattr(self, "_seismogram_component", "P") or "P"
+        if comp not in ("P", "Vz", "Vx"):
+            comp = "P"
         if source_type == "named":
             self._pending_backward_seismogram_name = dlg.get_seismogram_source_name()
             if not self._pending_backward_seismogram_name:
                 QMessageBox.warning(self, "Run Backward", "Select seismogram source.")
                 return
             fwd_run = self._get_forward_run(self._pending_backward_seismogram_name)
-            if not fwd_run or fwd_run.get("seismogram_data") is None:
-                QMessageBox.warning(self, "Run Backward", "Selected run has no seismogram.")
+            seis_map = (fwd_run.get("seismograms") or {}) if fwd_run else {}
+            if not fwd_run or seis_map.get(comp) is None:
+                QMessageBox.warning(self, "Run Backward", "Selected run has no {} seismogram.".format(comp))
                 return
-            seismogram_data = np.array(fwd_run["seismogram_data"], dtype=np.float64, copy=True)
+            seismogram_data = np.array(seis_map.get(comp), dtype=np.float64, copy=True)
             seismogram_t_ms = fwd_run["seismogram_t_ms"]
         else:
             full_name = dlg.get_residual_full_name()
@@ -2447,14 +3471,16 @@ class MainWindow(QMainWindow):
                 return
             fwd_full = self._get_forward_run(full_name)
             fwd_smooth = self._get_forward_run(smoothed_name)
-            if not fwd_full or fwd_full.get("seismogram_data") is None:
-                QMessageBox.warning(self, "Run Backward", "Run «{}» has no seismogram.".format(full_name))
+            full_map = (fwd_full.get("seismograms") or {}) if fwd_full else {}
+            smooth_map = (fwd_smooth.get("seismograms") or {}) if fwd_smooth else {}
+            if not fwd_full or full_map.get(comp) is None:
+                QMessageBox.warning(self, "Run Backward", "Run «{}» has no {} seismogram.".format(full_name, comp))
                 return
-            if not fwd_smooth or fwd_smooth.get("seismogram_data") is None:
-                QMessageBox.warning(self, "Run Backward", "Run «{}» has no seismogram.".format(smoothed_name))
+            if not fwd_smooth or smooth_map.get(comp) is None:
+                QMessageBox.warning(self, "Run Backward", "Run «{}» has no {} seismogram.".format(smoothed_name, comp))
                 return
-            full_data = np.asarray(fwd_full["seismogram_data"], dtype=np.float64)
-            smooth_data = np.asarray(fwd_smooth["seismogram_data"], dtype=np.float64)
+            full_data = np.asarray(full_map.get(comp), dtype=np.float64)
+            smooth_data = np.asarray(smooth_map.get(comp), dtype=np.float64)
             t_full = np.asarray(fwd_full["seismogram_t_ms"], dtype=np.float64)
             t_smooth = np.asarray(fwd_smooth["seismogram_t_ms"], dtype=np.float64)
             n_save_full, n_rec = full_data.shape
