@@ -1279,7 +1279,7 @@ class ReceiversDialog(QDialog):
 
 
 class SimulationSettingsDialog(QDialog):
-    """Параметры симуляции: Tmax, NPML, DT, SNAPSHOT_DT, Laplacian scheme. Модель (Original/Smoothed) задаётся в диалогах Run Forward / Run Backward."""
+    """Параметры симуляции: Tmax, NPML, DT, SNAPSHOT_DT, Spatial order (2nd/4th). Модель (Original/Smoothed) задаётся в диалогах Run Forward / Run Backward."""
     def __init__(self, parent=None, tmax_ms=1000, npml=50, dt_ms=None, snapshot_dt_ms=2, laplacian="4pt"):
         super().__init__(parent)
         self.setWindowTitle("Simulation — Settings")
@@ -1310,7 +1310,7 @@ class SimulationSettingsDialog(QDialog):
         self.laplacian_combo = QComboBox()
         self.laplacian_combo.addItems(["4pt", "2pt"])
         self.laplacian_combo.setCurrentText(laplacian if laplacian in ("4pt", "2pt") else "4pt")
-        layout.addRow("Laplacian scheme:", self.laplacian_combo)
+        layout.addRow("Spatial order:", self.laplacian_combo)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
